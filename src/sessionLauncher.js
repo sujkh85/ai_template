@@ -26,7 +26,28 @@ export function launchNextSession({ sessionNumber = 1, delayMs = 2000 } = {}) {
     const env = { ...process.env };
     delete env.HANDOFF_FILE;
 
-    console.log(`[SessionLauncher] 새 세션 프로세스 시작: node ${entryPoint}`);
+    const openNewWindow = process.env.OPEN_NEW_WINDOW !== 'false';
+    const isWindows = process.platform === 'win32';
+
+    if (openNewWindow && isWindows) {
+      const nodeCommand = `"${process.execPath}" "${entryPoint}"`;
+      console.log(`[SessionLauncher] Windows 새 콘솔 창에서 세션 ${sessionNumber} 시작`);
+      const child = spawn(
+        'cmd.exe',
+        ['/c', 'start', `"AutoAgent Session ${sessionNumber}"`, 'cmd', '/k', nodeCommand],
+        {
+          cwd: process.cwd(),
+          env,
+          detached: true,
+          stdio: 'ignore',
+        }
+      );
+      child.unref();
+      process.exit(0);
+      return;
+    }
+
+    console.log(`[SessionLauncher] 같은 터미널에서 새 세션 프로세스 시작: node ${entryPoint}`);
     console.log('─'.repeat(60));
     console.log(`  세션 ${sessionNumber} 시작`);
     console.log('─'.repeat(60) + '\n');
@@ -34,8 +55,8 @@ export function launchNextSession({ sessionNumber = 1, delayMs = 2000 } = {}) {
     const child = spawn(process.execPath, [entryPoint], {
       cwd: process.cwd(),
       env,
-      stdio: 'inherit',   // 같은 터미널에서 출력 공유
-      detached: false,    // 부모 프로세스 종료 시 같이 종료
+      stdio: 'inherit',
+      detached: false,
     });
 
     child.on('error', (err) => {
@@ -48,7 +69,6 @@ export function launchNextSession({ sessionNumber = 1, delayMs = 2000 } = {}) {
       }
     });
 
-    // 현재 프로세스 종료 (새 프로세스에게 자리 넘김)
     process.exit(0);
   }, delayMs);
 }

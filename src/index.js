@@ -63,7 +63,7 @@ async function main() {
   console.log(`\n⚙️  파이프라인: ${getConfigSummary()}`);
   console.log(`⚙️  AUTO_RESTART: ${autoRestart ? 'ON (완료/한도 후 새 세션 자동 시작)' : 'OFF'}`);
   console.log(`⚙️  Worker 반복: ${getWorkerIterations()}회`);
-  console.log(`⚙️  컨텍스트 임계치: ${Math.round(Number(process.env.CONTEXT_THRESHOLD ?? 0.9) * 100)}%`);
+  console.log(`⚙️  컨텍스트 임계치: ${Math.round(Number(process.env.CONTEXT_THRESHOLD ?? 0.8) * 100)}%`);
   console.log(`⚙️  Recursion Limit: ${recursionLimit}\n`);
   console.log(`🚀 세션 ${sessionNumber} 시작\n`);
 

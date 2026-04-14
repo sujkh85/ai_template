@@ -147,11 +147,12 @@ npm start
 | `WORKER_AI` | `claude` | Worker 에이전트 AI (`claude` \| `gemini` \| `codex`) |
 | `GO_FILE` | `./go.md` | 읽을 go.md 파일 경로 |
 | `AUTO_RESTART` | `true` | 세션 종료 후 자동으로 새 세션 시작 여부 |
+| `OPEN_NEW_WINDOW` | `true` | Windows에서 자동 재시작 시 새 콘솔 창으로 실행 여부 |
 | `CONTINUOUS_MODE` | `false` | 모든 태스크 완료 후 처음부터 반복 여부 |
 | `WORKER_ITERATIONS` | `1` | Worker 에이전트 반복 횟수 |
 | `RECURSION_LIMIT` | `5000` | LangGraph 재귀 한도 (무한 루프 방지) |
 | `CLI_TIMEOUT_MS` | `600000` | CLI 호출 최대 대기 시간 (ms, 기본 10분) |
-| `CONTEXT_THRESHOLD` | `0.9` | 핸드오프 트리거 토큰 사용률 (0.0 ~ 1.0) |
+| `CONTEXT_THRESHOLD` | `0.8` | 핸드오프 트리거 토큰 사용률 (0.0 ~ 1.0) |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama 서버 URL (CLI 폴백용) |
 | `OLLAMA_MODEL` | `gemma3:12b` | Ollama 사용 모델 |
 | `VERBOSE` | `true` | 상세 로그 출력 여부 |

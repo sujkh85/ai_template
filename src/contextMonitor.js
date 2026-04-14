@@ -9,7 +9,7 @@ const LIMITS = {
   ollama:    131_072,
 };
 
-const THRESHOLD = Number(process.env.CONTEXT_THRESHOLD ?? 0.9);
+const THRESHOLD = Number(process.env.CONTEXT_THRESHOLD ?? 0.8);
 
 class ContextMonitor {
   constructor() {
