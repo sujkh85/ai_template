@@ -1,24 +1,26 @@
 /**
  * 각 AI의 컨텍스트 사용량을 추적하고 임계치 도달 시 핸드오프를 트리거합니다.
+ *
+ * 한도(LIMIT)는 선택 사항입니다. 환경변수로 설정하지 않으면 사용량만 표시됩니다.
+ * 한도를 설정하면 핸드오프 임계치 체크와 사용률(%) 표시가 활성화됩니다.
+ *   CLAUDE_CONTEXT_LIMIT=200000
+ *   GEMINI_CONTEXT_LIMIT=1048576
+ *   CODEX_CONTEXT_LIMIT=128000
+ *   OLLAMA_CONTEXT_LIMIT=131072
  */
 
-const LIMITS = {
-  gemini:  1_048_576,
-  codex:     128_000,
-  claude:    200_000,
-  ollama:    131_072,
-};
+function getLimit(key) {
+  const envKey = `${key.toUpperCase()}_CONTEXT_LIMIT`;
+  const val = process.env[envKey];
+  return val ? Number(val) : null;
+}
 
-const THRESHOLD = Number(process.env.CONTEXT_THRESHOLD ?? 0.8);
+const THRESHOLD = Number(process.env.CONTEXT_THRESHOLD ?? 0.9);
 
 class ContextMonitor {
   constructor() {
-    this.usage = {
-      gemini: 0,
-      codex:  0,
-      claude: 0,
-      ollama: 0,
-    };
+    // 사용한 모델만 동적으로 추가됨
+    this.usage = {};
   }
 
   extractTokensFromText(text = '') {
@@ -73,21 +75,25 @@ class ContextMonitor {
   update(agentKey, messages, textFallback = '') {
     const tokens = this.extractTokens(agentKey, messages, textFallback);
     this.usage[agentKey] = (this.usage[agentKey] ?? 0) + tokens;
+
     const verbose = process.env.VERBOSE !== 'false';
     if (verbose) {
-      console.log(
-        `[ContextMonitor] ${agentKey}: +${tokens} → 누적 ${this.usage[agentKey].toLocaleString()} / ${(LIMITS[agentKey] ?? 131072).toLocaleString()} (${this.getPercent(agentKey)}%)`
-      );
+      const used  = this.usage[agentKey];
+      const limit = getLimit(agentKey);
+      if (limit) {
+        const pct = ((used / limit) * 100).toFixed(1);
+        console.log(`[ContextMonitor] ${agentKey}: +${tokens} → 누적 ${used.toLocaleString()} / ${limit.toLocaleString()} (${pct}%)`);
+      } else {
+        console.log(`[ContextMonitor] ${agentKey}: +${tokens} → 누적 ${used.toLocaleString()} tokens`);
+      }
     }
     return tokens;
   }
 
-  getPercent(agentKey) {
-    return (((this.usage[agentKey] ?? 0) / (LIMITS[agentKey] ?? 131072)) * 100).toFixed(1);
-  }
-
   isNearLimit(agentKey) {
-    return (this.usage[agentKey] ?? 0) / (LIMITS[agentKey] ?? 131072) >= THRESHOLD;
+    const limit = getLimit(agentKey);
+    if (!limit) return false;
+    return (this.usage[agentKey] ?? 0) / limit >= THRESHOLD;
   }
 
   anyNearLimit() {
@@ -95,21 +101,25 @@ class ContextMonitor {
   }
 
   getSummary() {
-    return Object.entries(this.usage)
-      .map(([key, used]) => {
-        const limit = LIMITS[key] ?? 131072;
-        const pct = ((used / limit) * 100).toFixed(1);
-        const filled = Math.round(pct / 10);
-        const bar = '█'.repeat(filled) + '░'.repeat(Math.max(0, 10 - filled));
-        return `| ${key.padEnd(6)} | ${bar} | ${pct}% | ${used.toLocaleString()} / ${limit.toLocaleString()} |`;
+    const used = Object.entries(this.usage).filter(([, v]) => v > 0);
+    if (used.length === 0) return '(사용 없음)';
+
+    return used
+      .map(([key, tokens]) => {
+        const limit = getLimit(key);
+        if (limit) {
+          const pct    = ((tokens / limit) * 100).toFixed(1);
+          const filled = Math.round(Number(pct) / 10);
+          const bar    = '█'.repeat(filled) + '░'.repeat(Math.max(0, 10 - filled));
+          return `| ${key.padEnd(6)} | ${bar} | ${pct.padStart(5)}% | ${tokens.toLocaleString().padStart(10)} / ${limit.toLocaleString()} |`;
+        }
+        return `| ${key.padEnd(6)} | ${tokens.toLocaleString().padStart(10)} tokens |`;
       })
       .join('\n');
   }
 
   reset() {
-    for (const key of Object.keys(this.usage)) {
-      this.usage[key] = 0;
-    }
+    this.usage = {};
   }
 }
 

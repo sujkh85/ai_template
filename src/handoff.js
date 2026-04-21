@@ -42,7 +42,7 @@ export async function generateHandoff(state, contextMonitor, goContent = '') {
   const content = `# 작업 인계 파일 (Handoff)
 
 > 생성 시각: ${now.toLocaleString('ko-KR')}
-> 중단 사유: **컨텍스트 사용량 임계치(${Math.round(Number(process.env.CONTEXT_THRESHOLD ?? 0.8) * 100)}%) 도달**
+> 중단 사유: **컨텍스트 사용량 임계치(${Math.round(Number(process.env.CONTEXT_THRESHOLD ?? 0.9) * 100)}%) 도달**
 
 ---
 

@@ -6,7 +6,9 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "make-design": "node src/makeDesign.js",
+    "make-go": "node src/makeGo.js"
   },
   "dependencies": {
     "@langchain/core": "^0.3.0",

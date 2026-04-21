@@ -150,3 +150,34 @@ export function getCompletionKeyword(taskName) {
 
   return `${taskName.slice(0, 20)} 완료`;
 }
+
+/**
+ * Worker 출력에 go.md에서 요구한 태스크 완료 문구가 있는지 판별합니다.
+ * 임의의 "완료" 단어만으로는 완료 처리하지 않습니다.
+ *
+ * @param {string} output
+ * @param {string} completionKeyword {@link getCompletionKeyword} 결과
+ * @param {string} currentTask `###` 줄에서 추출한 태스크 제목
+ */
+export function outputMatchesTaskCompletion(output, completionKeyword, currentTask) {
+  const text = typeof output === 'string' ? output : '';
+  const kw = (completionKeyword ?? '').trim();
+  if (kw && text.toLowerCase().includes(kw.toLowerCase())) {
+    return true;
+  }
+
+  const task = currentTask ?? '';
+  const koNum = task.match(/^태스크\s*(\d+)/i);
+  if (koNum) {
+    const n = koNum[1];
+    if (new RegExp(`태스크\\s*${n}\\s*완료`, 'i').test(text)) return true;
+  }
+
+  const enNum = task.match(/^task\s*(\d+)/i);
+  if (enNum) {
+    const n = enNum[1];
+    if (new RegExp(`task\\s*${n}\\s*complete`, 'i').test(text)) return true;
+  }
+
+  return false;
+}
