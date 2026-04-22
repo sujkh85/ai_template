@@ -1,7 +1,7 @@
 /**
- * 사이클 완료 후 go.md에 진행 상황과 세션 로그를 기록합니다.
+ * 사이클 완료 후 goal.md에 진행 상황과 세션 로그를 기록합니다.
  *
- * go.md 구조:
+ * goal.md 구조:
  *   [사용자 작성 영역]  ← 태스크 정의, 수정 가능
  *   <!-- AUTO-GENERATED -->  ← 이 아래는 자동 생성
  *   [진행 상황 섹션]    ← 완료/미완료 태스크 목록
@@ -14,10 +14,10 @@ import path from 'path';
 const SEPARATOR = '<!-- AUTO-GENERATED: 아래 내용은 자동 생성됩니다. 수정하지 마세요. -->';
 
 /**
- * go.md에 사이클 결과를 기록합니다.
+ * goal.md에 사이클 결과를 기록합니다.
  *
  * @param {object} params
- * @param {string} params.goFilePath     - go.md 파일 경로
+ * @param {string} params.goFilePath     - goal.md 파일 경로
  * @param {string[]} params.completedTasks - 이번 세션에서 완료된 태스크
  * @param {string[]} params.pendingTasks   - 아직 남은 태스크
  * @param {string[]} params.allTasks       - 전체 태스크 목록
@@ -77,7 +77,7 @@ export async function writeGoProgress({
     ? `${existingLog}\n\n${newLogEntry}`
     : newLogEntry;
 
-  // ─── 전체 go.md 재조합 ──────────────────────────────────
+  // ─── 전체 goal.md 재조합 ──────────────────────────────────
   const autoSection = [
     SEPARATOR,
     '',
@@ -104,14 +104,14 @@ export async function writeGoProgress({
   const newContent = `${userContent}\n\n${autoSection}`;
   await fs.writeFile(resolved, newContent, 'utf-8');
 
-  console.log(`[GoWriter] go.md 업데이트 완료: ${resolved}`);
+  console.log(`[GoWriter] goal.md 업데이트 완료: ${resolved}`);
   console.log(`[GoWriter] 완료: ${completedTasks.length}개 / 남음: ${pendingTasks.length}개`);
 
   return resolved;
 }
 
 /**
- * 기존 go.md에서 세션 로그 텍스트만 추출합니다.
+ * 기존 goal.md에서 세션 로그 텍스트만 추출합니다.
  */
 function extractExistingLog(raw) {
   const logStart = raw.indexOf('## 세션 로그');
@@ -137,7 +137,7 @@ function buildContextSummary(contextMonitor) {
 }
 
 /**
- * go.md에서 현재 세션 번호를 계산합니다.
+ * goal.md에서 현재 세션 번호를 계산합니다.
  * 세션 로그의 "세션 N" 중 가장 큰 N + 1을 반환합니다.
  */
 export async function getNextSessionNumber(goFilePath) {

@@ -1,17 +1,318 @@
+# Auto Agent Template (Infinite Context)
+
+Korean and English README for the current codebase.
+
+---
+
+## 한국어 안내
+
+### 1) 프로젝트 소개
+
+이 프로젝트는 **infinite-context MCP 기반 자율 실행 템플릿**입니다.  
+핵심은 다음과 같습니다.
+
+- `agent.md` + `requirements.md` + task 문맥을 합쳐 Worker에게 전달
+- `Supervisor -> Worker` LangGraph 루프로 태스크를 계속 실행
+- 컨텍스트 한도 접근 시 handoff/재시작으로 장기 작업 유지
+- 설계/태스크 문서를 생성하고(`make-design`, `make-task`), 메모리에 저장(`db-save-task`)한 뒤 실행(`start`)
+
+---
+
+### 2) 핵심 실행 명령어
+
+```bash
+pnpm install
+```
+
+```bash
+pnpm make-design
+pnpm make-task
+pnpm db-save-task
+pnpm start
+```
+
+한 번에 실행:
+
+```bash
+pnpm go
+```
+
+`pnpm go`는 아래 순서로 실행됩니다.
+
+1. `make-design`
+2. `make-task`
+3. `db-save-task`
+4. `start`
+
+---
+
+### 3) 빠른 시작
+
+1. `.env.example`을 복사해서 `.env` 생성
+2. `goal.md`, `agent.md`, `requirements.md` 준비
+3. 필요한 경우 AI CLI 로그인(예: `agent login`, `gh auth login`)
+4. `pnpm go` 실행
+
+---
+
+### 4) 실행 흐름
+
+1. `make-design`  
+   - `goal.md`를 읽어 `design/*.md` 설계 문서 생성
+   - 세션당 생성 수 제한(`DESIGN_MAX_FILES_PER_SESSION`) 및 체크포인트 지원
+
+2. `make-task`  
+   - `design/*.md`를 읽어 `task/*.md` 실행 태스크 문서 생성
+   - 세션당 생성 수 제한(`TASK_MAX_FILES_PER_SESSION`) 및 체크포인트 지원
+
+3. `db-save-task`  
+   - `task/*.md`를 infinite-context 메모리에 저장 시도
+   - MCP 조회 실패 대비로 `task/.task-memory-export.json` 백업 저장
+
+4. `start`  
+   - `Supervisor -> Worker -> contextGate` 그래프 실행
+   - task-doc 메모리를 우선 조회하고, 없으면 로컬 백업 사용
+   - 남은 태스크가 있으면 `AUTO_RESTART=true`일 때 다음 세션 자동 시작
+
+---
+
+### 5) 주요 환경 변수
+
+전체는 `.env.example` 참고, 자주 쓰는 항목만 요약:
+
+- 실행/AI
+  - `SUPERVISOR_AI` (`claude | gemini | codex | agent | copilot`)
+  - `WORKER_AI`
+  - `EXECUTION_MODE` (기본: `infinite-context`)
+- 입력/출력 경로
+  - `AGENT_FILE`, `REQUIREMENTS_FILE`, `GO_FILE`
+  - `DESIGN_DIR`, `TASK_DIR`
+- 자동 실행 제어
+  - `AUTO_RESTART` (기본 `true`)
+  - `CONTINUOUS_MODE` (모든 태스크 완료 후 반복 여부)
+  - `WORKER_ITERATIONS`
+  - `ENFORCE_TEST_COMPLETION`
+- 컨텍스트/한도
+  - `CONTEXT_THRESHOLD` (기본 `0.75`)
+  - `CLAUDE_CONTEXT_LIMIT`, `GEMINI_CONTEXT_LIMIT`, `CODEX_CONTEXT_LIMIT` 등
+- 폴백
+  - `OLLAMA_URL`, `OLLAMA_MODEL`
+
+---
+
+### 6) 프로젝트 구조
+
+```text
+.
+├─ agent.md
+├─ requirements.md
+├─ goal.md
+├─ .env.example
+├─ package.json
+├─ design/
+├─ task/
+└─ src/
+   ├─ index.js               # 메인 실행 엔트리
+   ├─ graph.js               # LangGraph 구성
+   ├─ agents/
+   │  ├─ supervisor.js       # 다음 노드 결정
+   │  └─ workerAgent.js      # 실제 태스크 실행
+   ├─ cliRunner.js           # CLI 실행 + Ollama 폴백 + MCP 메모리 연동
+   ├─ makeDesign.js          # goal -> design 문서 생성
+   ├─ makeTask.js            # design -> task 문서 생성
+   ├─ dbSaveTask.js          # task 문서 메모리 저장
+   ├─ designBundle.js        # design 문서 자동 주입
+   ├─ contextMonitor.js      # 토큰 사용량 추적
+   ├─ handoff.js             # handoff 파일 생성
+   ├─ sessionLauncher.js     # 다음 세션 프로세스 실행
+   ├─ loadEnv.js             # .env/.env.example 로드
+   ├─ goalReader.js
+   └─ goalWriter.js
+```
+
+---
+
+### 7) 운영 팁
+
+- `task-doc` 메모리 조회가 비어도 로컬 백업(`.task-memory-export.json`)으로 이어서 실행됩니다.
+- 컨텍스트 한도 기반 핸드오프를 쓰려면 각 모델의 `*_CONTEXT_LIMIT` 값을 지정하세요.
+- `CONTINUOUS_MODE=true`면 모든 태스크 완료 후 처음부터 다시 순환합니다.
+
+---
+
+### 8) 문제 해결
+
+- `design 폴더를 찾을 수 없습니다`  
+  -> `DESIGN_DIR` 경로 확인 또는 먼저 `pnpm make-design` 실행
+
+- `task 문서가 없습니다`  
+  -> `pnpm make-task`를 먼저 실행했는지 확인
+
+- CLI 실행 실패 후 빈 응답  
+  -> 해당 CLI 로그인/권한 상태 확인, `OLLAMA_URL`/`OLLAMA_MODEL` 점검
+
+---
+
+## English Guide
+
+### 1) Overview
+
+This is an **autonomous agent template powered by infinite-context MCP**.
+
+Key behavior:
+
+- Combines `agent.md`, `requirements.md`, and runtime task context for workers
+- Runs a LangGraph loop (`Supervisor -> Worker`) until tasks are completed
+- Uses handoff/restart when context usage gets high
+- Supports planning pipeline (`make-design`, `make-task`, `db-save-task`) before runtime execution
+
+---
+
+### 2) Core Commands
+
+```bash
+pnpm install
+```
+
+```bash
+pnpm make-design
+pnpm make-task
+pnpm db-save-task
+pnpm start
+```
+
+Run everything in one shot:
+
+```bash
+pnpm go
+```
+
+Execution order of `pnpm go`:
+
+1. `make-design`
+2. `make-task`
+3. `db-save-task`
+4. `start`
+
+---
+
+### 3) Quick Start
+
+1. Copy `.env.example` to `.env`
+2. Prepare `goal.md`, `agent.md`, and `requirements.md`
+3. Sign in to required CLIs (for example `agent login`, `gh auth login`)
+4. Run `pnpm go`
+
+---
+
+### 4) Runtime Flow
+
+1. `make-design`  
+   - Reads `goal.md` and generates `design/*.md`
+   - Supports per-session file limits and checkpoints
+
+2. `make-task`  
+   - Reads `design/*.md` and generates executable `task/*.md`
+   - Supports per-session file limits and checkpoints
+
+3. `db-save-task`  
+   - Stores `task/*.md` into infinite-context memory
+   - Also writes a local backup to `task/.task-memory-export.json`
+
+4. `start`  
+   - Runs the `Supervisor -> Worker -> contextGate` graph
+   - Loads task-docs from memory first, then falls back to local backup
+   - Auto-restarts into the next session when `AUTO_RESTART=true` and work remains
+
+---
+
+### 5) Important Environment Variables
+
+See `.env.example` for full details. Commonly used:
+
+- AI/runtime
+  - `SUPERVISOR_AI` (`claude | gemini | codex | agent | copilot`)
+  - `WORKER_AI`
+  - `EXECUTION_MODE` (default: `infinite-context`)
+- Paths
+  - `AGENT_FILE`, `REQUIREMENTS_FILE`, `GO_FILE`
+  - `DESIGN_DIR`, `TASK_DIR`
+- Execution control
+  - `AUTO_RESTART` (default `true`)
+  - `CONTINUOUS_MODE`
+  - `WORKER_ITERATIONS`
+  - `ENFORCE_TEST_COMPLETION`
+- Context limits
+  - `CONTEXT_THRESHOLD` (default `0.75`)
+  - `CLAUDE_CONTEXT_LIMIT`, `GEMINI_CONTEXT_LIMIT`, `CODEX_CONTEXT_LIMIT`, etc.
+- Fallback
+  - `OLLAMA_URL`, `OLLAMA_MODEL`
+
+---
+
+### 6) Project Structure
+
+```text
+.
+├─ agent.md
+├─ requirements.md
+├─ goal.md
+├─ .env.example
+├─ package.json
+├─ design/
+├─ task/
+└─ src/
+   ├─ index.js
+   ├─ graph.js
+   ├─ agents/
+   │  ├─ supervisor.js
+   │  └─ workerAgent.js
+   ├─ cliRunner.js
+   ├─ makeDesign.js
+   ├─ makeTask.js
+   ├─ dbSaveTask.js
+   ├─ designBundle.js
+   ├─ contextMonitor.js
+   ├─ handoff.js
+   ├─ sessionLauncher.js
+   ├─ loadEnv.js
+   ├─ goalReader.js
+   └─ goalWriter.js
+```
+
+---
+
+### 7) Operational Notes
+
+- If memory lookup returns no task-docs, runtime still continues using local backup.
+- To enable threshold-based handoff, define model context limits (`*_CONTEXT_LIMIT`).
+- With `CONTINUOUS_MODE=true`, completed task sets are reset and execution loops again.
+
+---
+
+### 8) Troubleshooting
+
+- `design folder not found`  
+  -> Check `DESIGN_DIR` or run `pnpm make-design` first.
+
+- `no task documents`  
+  -> Run `pnpm make-task` before `pnpm db-save-task` or `pnpm start`.
+
+- CLI failure / empty output after fallback  
+  -> Verify CLI auth, and check `OLLAMA_URL` / `OLLAMA_MODEL`.
 # auto-agent-template
 
 ## English
 
-> A multi-agent template for autonomous execution using either `go.md` or `infinite-context` memory.
+> A multi-agent template for autonomous execution with `infinite-context` memory.
 
-This template supports both `go.md` task-driven execution and `agent.md + requirements.md + infinite-context MCP` execution.  
+This template is focused on `agent.md + requirements.md + infinite-context MCP` execution.  
 When context reaches its threshold, it saves progress and automatically restarts in a new session to continue work without interruption.
 
 ---
 
 ## Features
 
-- **go.md mode** — define tasks in markdown and run them in order
 - **infinite-context mode** — use `agent.md`/`requirements.md` as runtime instructions with MCP-first long-running memory flow
 - **Multi-agent pipeline** — Supervisor chooses next action and Worker executes tasks
 - **Automatic session restart** — resumes work after context-limit handoff
@@ -28,8 +329,8 @@ template/
 │   ├── index.js
 │   ├── graph.js
 │   ├── agentConfig.js
-│   ├── goReader.js
-│   ├── goWriter.js
+│   ├── goalReader.js
+│   ├── goalWriter.js
 │   ├── sessionLauncher.js
 │   ├── contextMonitor.js
 │   ├── handoff.js
@@ -37,7 +338,7 @@ template/
 │   └── agents/
 │       ├── supervisor.js
 │       └── workerAgent.js
-├── go.md
+├── goal.md
 ├── agent.md
 ├── requirements.md
 ├── .env
@@ -79,16 +380,7 @@ pnpm install
 cp .env.example .env
 ```
 
-### 4) Choose execution mode
-
-`go-md` mode:
-
-```env
-EXECUTION_MODE=go-md
-GO_FILE=./go.md
-```
-
-`infinite-context` mode:
+### 4) Configure execution mode
 
 ```env
 EXECUTION_MODE=infinite-context
@@ -134,11 +426,8 @@ Tip: add explicit rules in `agent.md` and prompts to prioritize MCP memory usage
 
 ```text
 npm start
-  └─ Check execution mode (go-md | infinite-context)
-       ├─ go-md
-       │    └─ Read go.md (task parse + completion restore)
-       └─ infinite-context
-            └─ Load agent.md + requirements.md (MCP-first guidance)
+  └─ Check execution mode (infinite-context)
+       └─ Load agent.md + requirements.md (MCP-first guidance)
        └─ LangGraph execution
             ├─ Supervisor decides next worker step
             ├─ Worker executes task
@@ -146,12 +435,8 @@ npm start
             │    ├─ below threshold → back to Supervisor
             │    └─ above threshold → trigger handoff
             └─ finish when work is done
-  └─ In go-md mode, write progress back to go.md
   └─ If AUTO_RESTART=true, start next session automatically
 ```
-
-In `go-md` mode, progress/session logs are appended to `go.md`.  
-In `infinite-context` mode, session continuity follows MCP memory flow instead of `go.md` logs.
 
 ---
 
@@ -159,10 +444,10 @@ In `infinite-context` mode, session continuity follows MCP memory flow instead o
 
 | Variable | Default | Description |
 |------|--------|------|
-| `EXECUTION_MODE` | `go-md` | Execution mode (`go-md` \| `infinite-context`) |
+| `EXECUTION_MODE` | `infinite-context` | Execution mode (`infinite-context`) |
 | `SUPERVISOR_AI` | `gemini` | Supervisor AI (`claude` \| `gemini` \| `codex`) |
 | `WORKER_AI` | `claude` | Worker AI (`claude` \| `gemini` \| `codex`) |
-| `GO_FILE` | `./go.md` | go.md path for `go-md` mode |
+| `GO_FILE` | `./goal.md` | goal file path |
 | `AGENT_FILE` | `./agent.md` | Agent instruction file for `infinite-context` mode |
 | `REQUIREMENTS_FILE` | `./requirements.md` | Requirements file for `infinite-context` mode |
 | `AUTO_RESTART` | `true` | Auto-start next session after cycle ends |
@@ -191,21 +476,20 @@ In `infinite-context` mode, session continuity follows MCP memory flow instead o
 
 ## 한국어
 
-> `go.md` 또는 `infinite-context` 메모리를 기반으로 자율 실행하는 멀티 에이전트 템플릿
+> `infinite-context` 메모리를 기반으로 자율 실행하는 멀티 에이전트 템플릿
 
-`go.md` 지시서 기반 실행과 `agent.md + requirements.md + infinite-context MCP` 기반 실행을 모두 지원합니다. 컨텍스트 한도에 도달하면 진행 상황을 저장하고 새 세션으로 자동 재시작하여 작업을 끊김 없이 이어갑니다.
+`agent.md + requirements.md + infinite-context MCP` 기반 실행에 집중합니다. 컨텍스트 한도에 도달하면 진행 상황을 저장하고 새 세션으로 자동 재시작하여 작업을 끊김 없이 이어갑니다.
 
 ---
 
 ## 특징
 
-- **go.md 기반 실행** — 마크다운 파일에 태스크를 정의하면 에이전트가 자동으로 파싱하여 순서대로 실행
 - **infinite-context 기반 실행** — `agent.md`/`requirements.md`를 런타임 지시로 사용하고, MCP 메모리 우선으로 장기 작업 지속
 - **멀티 에이전트 파이프라인** — Supervisor가 다음 실행 에이전트를 결정하고, Worker가 실제 태스크를 처리
-- **자동 세션 재시작** — 컨텍스트 토큰 한도 도달 시 진행 상황을 go.md에 기록하고 새 Node 프로세스로 자동 재개
+- **자동 세션 재시작** — 컨텍스트 토큰 한도 도달 시 핸드오프를 기록하고 새 Node 프로세스로 자동 재개
 - **AI 조합 선택** — Supervisor와 Worker에 각각 `claude`, `gemini`, `codex`, `agent`, `copilot` 중 원하는 AI 지정 가능
 - **Ollama 폴백** — CLI 호출 실패 시 로컬 Ollama 모델로 자동 전환
-- **concept → design → go** — `concept.md`만 두고 `make-design` / `make-go`로 기획서와 실행용 `go.md`를 자동 생성할 수 있음
+- **goal → design → task** — `goal.md`를 기반으로 `make-design` / `make-task`로 기획서와 실행 태스크 문서를 자동 생성할 수 있음
 
 ---
 
@@ -217,11 +501,11 @@ template/
 │   ├── index.js           # 진입점 — 세션 관리 및 그래프 실행
 │   ├── graph.js           # LangGraph 워크플로우 정의
 │   ├── agentConfig.js     # AI CLI 설정 관리
-│   ├── goReader.js        # go.md 파싱 (태스크, 완료 상태 추출)
-│   ├── goWriter.js        # 세션 결과를 go.md에 기록
+│   ├── goalReader.js      # goal.md 파싱 (태스크, 완료 상태 추출)
+│   ├── goalWriter.js      # 세션 결과를 goal.md에 기록
 │   ├── designBundle.js    # DESIGN_DIR 마크다운을 go 컨텍스트에 병합
 │   ├── makeDesign.js      # concept.md → design/ 기획 문서
-│   ├── makeGo.js          # design/*.md → go.md
+│   ├── makeTask.js        # design/*.md → task/*.md
 │   ├── loadEnv.js         # 환경 변수 로드
 │   ├── sessionLauncher.js # 새 세션 프로세스 스폰
 │   ├── contextMonitor.js  # 토큰 사용량 추적
@@ -232,7 +516,8 @@ template/
 │       └── workerAgent.js # Worker 에이전트 노드
 ├── concept.md             # 아이디어·컨셉 입력 (make-design 입력)
 ├── design/                # 기획 마크다운 (make-design 출력, 런타임 참조)
-├── go.md                  # 작업 지시서 (직접 작성 또는 make-go 출력)
+├── goal.md                # 작업 지시서 입력
+├── task/                  # 실행 태스크 마크다운 (make-task 출력)
 ├── .env                   # 환경 설정 (복사 후 수정)
 ├── .env.example           # 환경 설정 예시
 └── package.json
@@ -287,7 +572,7 @@ cp .env.example .env
 SUPERVISOR_AI=gemini   # supervisor에 사용할 AI (claude | gemini | codex | agent | copilot)
 WORKER_AI=claude       # worker에 사용할 AI (claude | gemini | codex | agent | copilot)
 
-# (선택) design 폴더의 markdown 파일을 go.md 뒤에 자동 주입
+# (선택) design 폴더의 markdown 파일을 goal.md 뒤에 자동 주입
 DESIGN_DIR=./design
 # DESIGN_GLOB=**/*.md
 # DESIGN_MAX_CHARS_PER_FILE=200000
@@ -295,18 +580,19 @@ DESIGN_DIR=./design
 
 ### 4. 기획에서 실행까지 (권장 플로우)
 
-수동으로 `go.md`를 쓰지 않고, 컨셉만으로 파이프라인을 탈 수 있습니다.
+수동으로 `goal.md`를 쓰지 않고, 컨셉만으로 파이프라인을 탈 수 있습니다.
 
 1. 루트에 `concept.md`를 작성합니다.
 2. 기획서 생성: `pnpm make-design` → 기본적으로 `design/design-plan.md`가 생성됩니다.
-3. 실행 문서 생성: `pnpm make-go` → `go.md`가 덮어씌워집니다. (design 폴더의 `**/*.md`를 읽어 태스크로 분해)
+3. 태스크 문서 생성: `pnpm make-task` → `task/*.md`가 생성됩니다. (design 폴더의 `**/*.md`를 읽어 실행 가능한 업무로 세분화)
 4. 에이전트 실행: `pnpm start` 또는 `pnpm dev`
+5. 한 번에 실행: `pnpm go` → `make-design → make-task → db-save-task → start`를 순차 실행합니다.
 
-`pnpm dev`는 `src` 코드 변경 시 프로세스를 다시 띄우는 **개발용 워치**이고, 태스크를 이어서 돌리는 **세션 재시작**은 주로 `AUTO_RESTART`와 `go.md` 자동 기록에 의해 이루어집니다.
+`pnpm dev`는 `src` 코드 변경 시 프로세스를 다시 띄우는 **개발용 워치**이고, 태스크를 이어서 돌리는 **세션 재시작**은 주로 `AUTO_RESTART`와 `goal.md` 자동 기록에 의해 이루어집니다.
 
-### 5. go.md 작성 (수동으로 쓸 때)
+### 5. goal.md 작성 (수동으로 쓸 때)
 
-`go.md`에 프로젝트 개요와 태스크를 작성합니다.
+`goal.md`에 프로젝트 개요와 태스크를 작성합니다.
 
 ```markdown
 # 프로젝트 이름
@@ -328,7 +614,7 @@ DESIGN_DIR=./design
 > **태스크 파싱 규칙**
 > - `### 태스크명` 형식의 헤더를 태스크로 인식합니다.
 > - `###`이 없으면 `##` 헤더를 태스크로 사용합니다.
-> - Worker가 **go.md에 맞춘 완료 문구**를 출력하면 해당 태스크가 완료 처리됩니다. 번호 태스크는 `태스크1 완료` 또는 `태스크 1 완료`처럼 공백이 있어도 인식합니다.
+> - Worker가 **goal.md에 맞춘 완료 문구**를 출력하면 해당 태스크가 완료 처리됩니다. 번호 태스크는 `태스크1 완료` 또는 `태스크 1 완료`처럼 공백이 있어도 인식합니다.
 
 ### 6. 실행
 
@@ -369,7 +655,7 @@ npm start
 
 ### 7. infinite-context 자율주행 모드 사용
 
-기존 `go.md` 반복 파싱 대신, `agent.md + requirements.md`를 기반으로 장기 세션 자율주행을 하려면 아래처럼 설정합니다.
+`agent.md + requirements.md`를 기반으로 장기 세션 자율주행을 하려면 아래처럼 설정합니다.
 
 1) `.env` 설정
 
@@ -387,10 +673,10 @@ npm start
 ```
 
 3) 동작 방식
-- `go.md` 태스크 큐 대신 `agent.md`/`requirements.md`를 런타임 지시로 사용합니다.
+- `agent.md`/`requirements.md`를 런타임 지시로 사용합니다.
 - Worker 반복 횟수(`WORKER_ITERATIONS`)만으로 태스크를 완료 처리하지 않고, 실제 완료 신호가 있을 때만 완료로 간주합니다.
 - 컨텍스트 임계치 도달 시 기존처럼 핸드오프 후 다음 세션으로 이어집니다.
-- 이 모드에서는 `go.md` 자동 진행 로그 기록을 생략합니다.
+- 세션 연속성은 `infinite-context` MCP 메모리 흐름 기준으로 이어집니다.
 
 ---
 
@@ -398,11 +684,8 @@ npm start
 
 ```
 npm start
-  └─ 실행 모드 확인 (go-md | infinite-context)
-       ├─ go-md
-       │    └─ go.md 읽기 (태스크 파싱 + 완료 상태 복원)
-       └─ infinite-context
-            └─ agent.md + requirements.md 로드 (MCP 메모리 우선 지시)
+  └─ 실행 모드 확인 (infinite-context)
+       └─ agent.md + requirements.md 로드 (MCP 메모리 우선 지시)
        └─ LangGraph 실행
             ├─ Supervisor → 다음 실행할 Worker 결정
             ├─ Worker → 태스크 실행
@@ -410,12 +693,8 @@ npm start
             │    ├─ 한도 미달 → Supervisor로 반환
             │    └─ 한도 초과 → Handoff 트리거
             └─ 모든 태스크 완료 → 종료
-  └─ go-md 모드면 go.md에 결과 기록 (완료/미완료 태스크, 세션 로그)
   └─ AUTO_RESTART=true이면 새 세션 자동 시작
 ```
-
-`go-md` 모드에서는 세션 완료 후 `go.md` 하단에 진행 상황과 세션 로그가 자동으로 기록됩니다.  
-`infinite-context` 모드에서는 `go.md` 로그 기록 대신 MCP 메모리 흐름을 기준으로 다음 세션이 이어집니다.
 
 ---
 
@@ -423,20 +702,21 @@ npm start
 
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
-| `EXECUTION_MODE` | `go-md` | 실행 모드 (`go-md` \| `infinite-context`) |
+| `EXECUTION_MODE` | `infinite-context` | 실행 모드 (`infinite-context`) |
 | `SUPERVISOR_AI` | `gemini` | Supervisor 에이전트 AI (`claude` \| `gemini` \| `codex` \| `agent` \| `copilot`) |
 | `WORKER_AI` | `claude` | Worker 에이전트 AI (`claude` \| `gemini` \| `codex` \| `agent` \| `copilot`) |
-| `GO_FILE` | `./go.md` | 읽을 go.md 파일 경로 |
+| `GO_FILE` | `./goal.md` | `make-design` 입력 파일 경로 |
 | `AGENT_FILE` | `./agent.md` | `infinite-context` 모드에서 읽을 에이전트 지시 파일 |
 | `REQUIREMENTS_FILE` | `./requirements.md` | `infinite-context` 모드에서 읽을 요구사항 파일 |
-| `DESIGN_DIR` | `./design` | 기획 MD 출력 폴더(`make-design`)이자, 실행 시 go.md 뒤에 주입할 루트(비우면 주입 비활성) |
+| `DESIGN_DIR` | `./design` | 기획 MD 출력 폴더(`make-design`)이자, 실행 시 goal.md 뒤에 주입할 루트(비우면 주입 비활성) |
 | `DESIGN_GLOB` | `**/*.md` | `DESIGN_DIR` 하위에서 주입·수집할 마크다운 패턴 |
 | `DESIGN_MAX_CHARS_PER_FILE` | `200000` | 파일당 최대 주입 문자 수 |
 | `DESIGN_CONCEPT_FILE` | `./concept.md` | `make-design` 입력 파일 |
 | `DESIGN_OUTPUT_FILE` | `design-plan.md` | `make-design`이 `DESIGN_DIR` 안에 쓰는 파일명 |
 | `DESIGN_AI` | (미설정 시 `WORKER_AI`) | `make-design`에 쓰는 CLI |
-| `GO_AI` | (미설정 시 `WORKER_AI`) | `make-go`에 쓰는 CLI |
-| `MAKE_GO_DESIGN_INJECTION` | `file` | `make-go` 시 design 내용 전달 방식: `file`(@경로) \| `inline`(본문 삽입) \| `auto` |
+| `TASK_DIR` | `./task` | `make-task` 출력 폴더 |
+| `TASK_AI` | (미설정 시 `WORKER_AI`) | `make-task`에 쓰는 CLI |
+| `TASK_SOURCE_MAX_CHARS` | `200000` | `make-task`에서 design 문서 파일당 최대 입력 길이 |
 | `AUTO_RESTART` | `true` | 세션 종료 후 자동으로 새 세션 시작 여부 |
 | `CONTINUOUS_MODE` | `false` | 모든 태스크 완료 후 처음부터 반복 여부 |
 | `WORKER_ITERATIONS` | `1` | Worker 에이전트 반복 횟수 |
@@ -461,7 +741,7 @@ npm start
 
 | 상황 | `AUTO_RESTART=true` | `AUTO_RESTART=false` |
 |------|---------------------|----------------------|
-| 컨텍스트 한도 도달 | go.md 저장 후 새 세션 자동 시작 | go.md 저장 후 종료 |
+| 컨텍스트 한도 도달 | goal.md 저장 후 새 세션 자동 시작 | goal.md 저장 후 종료 |
 | 태스크 미완료 상태 종료 | 새 세션 자동 시작 | 종료 (수동 재시작 필요) |
 | 모든 태스크 완료 | 종료 | 종료 |
 

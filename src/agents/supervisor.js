@@ -1,5 +1,5 @@
 /**
- * Supervisor: go.md의 태스크 목록을 바탕으로 다음 실행할 에이전트를 결정합니다.
+ * Supervisor: goal.md의 태스크 목록을 바탕으로 다음 실행할 에이전트를 결정합니다.
  */
 
 import { withOllamaFallback } from '../cliRunner.js';
@@ -39,7 +39,7 @@ export async function supervisorNode(state) {
 
   const prompt =
     `당신은 자율 실행 시스템의 Supervisor입니다.\n` +
-    `go.md 파일에 정의된 태스크를 순서대로 실행합니다.\n\n` +
+    `goal.md 파일에 정의된 태스크를 순서대로 실행합니다.\n\n` +
     `현재 상황:\n` +
     `- 완료된 태스크: ${completedTasks.join(', ') || '없음'}\n` +
     `- 남은 태스크: ${pendingTasks.join(', ')}\n` +

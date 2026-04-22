@@ -2,98 +2,89 @@
  * 자율 에이전트 실행 시스템 — 진입점
  *
  * 사이클 흐름:
- *   1. go.md 읽기 (태스크 + 이전 완료 상태 파싱)
+ *   1. goal.md 읽기 (태스크 + 이전 완료 상태 파싱)
  *   2. LangGraph로 에이전트 실행
- *   3. 사이클 종료 시 go.md에 결과 기록
+ *   3. 사이클 종료 시 goal.md에 결과 기록
  *   4. AUTO_RESTART=true 이면 새 Node 프로세스 스폰 (새 채팅 세션)
  *   5. 남은 태스크 없으면 완전 종료
  */
 
 import './loadEnv.js';
 import { buildGraph }        from './graph.js';
-import { readGoFile }        from './goReader.js';
 import { loadDesignBundle, augmentGoContent } from './designBundle.js';
 import { contextMonitor }    from './contextMonitor.js';
-import { writeGoProgress, getNextSessionNumber } from './goWriter.js';
 import { launchNextSession } from './sessionLauncher.js';
 import { getConfigSummary, getWorkerIterations } from './agentConfig.js';
+import { loadTaskDocsFromInfiniteContext } from './cliRunner.js';
 import { HumanMessage }      from '@langchain/core/messages';
 import fs                    from 'fs/promises';
 import path                  from 'path';
 
+function resolveResultDir(cwd) {
+  const configured = process.env.RESULT_DIR ?? './result';
+  const resultDir = path.resolve(cwd, configured);
+  const rel = path.relative(cwd, resultDir);
+  const isInsideProject = rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  if (!isInsideProject) {
+    throw new Error(`RESULT_DIR must be inside project root: ${resultDir}`);
+  }
+  return resultDir;
+}
+
 async function main() {
-  const executionMode  = process.env.EXECUTION_MODE ?? 'go-md';
-  const isInfiniteContextMode = executionMode === 'infinite-context';
-  const goFilePath     = process.env.GO_FILE ?? './go.md';
+  const executionMode  = 'infinite-context';
   const agentFilePath  = process.env.AGENT_FILE ?? './agent.md';
   const requirementsFilePath = process.env.REQUIREMENTS_FILE ?? './requirements.md';
   const autoRestart    = process.env.AUTO_RESTART !== 'false'; // 기본 true
   const recursionLimit = Number(process.env.RECURSION_LIMIT ?? 5000);
+  const enforceTestCompletion = process.env.ENFORCE_TEST_COMPLETION !== 'false';
 
   // ─── 세션 번호 계산 ──────────────────────────────────────
-  const sessionNumber = await getNextSessionNumber(goFilePath);
+  const sessionNumber = 1;
   printBanner(sessionNumber);
 
   // ─── 실행 컨텐츠 로딩 ──────────────────────────────────────
-  let goData;
-  if (!isInfiniteContextMode) {
-    try {
-      goData = await readGoFile(goFilePath);
-    } catch (err) {
-      console.error(`\n[ERROR] ${err.message}`);
-      console.error('go.md 파일을 생성하거나 GO_FILE 환경변수를 올바른 경로로 설정하세요.');
-      process.exit(1);
-    }
-  }
-
   let augmentedGoContent = '';
   let allTasks = [];
   let previouslyCompleted = [];
   let pendingTasks = [];
 
-  if (isInfiniteContextMode) {
-    const [agentContent, requirementsContent] = await Promise.all([
-      fs.readFile(path.resolve(agentFilePath), 'utf-8').catch(() => ''),
-      fs.readFile(path.resolve(requirementsFilePath), 'utf-8').catch(() => ''),
-    ]);
+  const [agentContent, requirementsContent] = await Promise.all([
+    fs.readFile(path.resolve(agentFilePath), 'utf-8').catch(() => ''),
+    fs.readFile(path.resolve(requirementsFilePath), 'utf-8').catch(() => ''),
+  ]);
+  const designBundle = await loadDesignBundle({ cwd: process.cwd() });
+  const runtimeTaskContext = await loadRuntimeTaskContext(process.cwd());
 
-    augmentedGoContent =
-      `# Autopilot Source (infinite-context mode)\n\n` +
-      `## agent.md\n${agentContent || '(agent.md 없음)'}\n\n` +
-      `## requirements.md\n${requirementsContent || '(requirements.md 없음)'}\n`;
+  augmentedGoContent = augmentGoContent(
+    `# Autopilot Source (infinite-context mode)\n\n` +
+    `## agent.md\n${agentContent || '(agent.md 없음)'}\n\n` +
+    `## requirements.md\n${requirementsContent || '(requirements.md 없음)'}\n\n` +
+    `## runtime tasks (infinite-context)\n${runtimeTaskContext.bundle || '(task 없음)'}\n`,
+    designBundle,
+  );
 
-    allTasks = ['requirements 기반 다음 최우선 작업 실행'];
-    previouslyCompleted = [];
-    pendingTasks = [...allTasks];
-
-    console.log(`📄 mode: infinite-context`);
-    console.log(`📄 agent.md: ${path.resolve(agentFilePath)}`);
-    console.log(`📄 requirements.md: ${path.resolve(requirementsFilePath)}`);
-    console.log('📝 태스크: 무한 컨텍스트 기반 자율 진행');
-  } else {
-    const designBundle = await loadDesignBundle({ cwd: process.cwd() });
-    augmentedGoContent = augmentGoContent(goData.userContent, designBundle);
-
-    console.log(`📄 go.md: ${goData.filePath}`);
-    if (process.env.DESIGN_DIR) {
-      console.log(`📁 DESIGN_DIR: ${path.resolve(process.cwd(), process.env.DESIGN_DIR)}`);
-    }
-    console.log(`📋 프로젝트: ${goData.title}`);
-    console.log(`📝 전체 태스크: ${goData.tasks.length}개`);
-
-    // 이전 세션 완료 태스크 (go.md 자동 생성 영역에서 복원)
-    previouslyCompleted = goData.completedTasks;
-    if (previouslyCompleted.length > 0) {
-      console.log(`\n[Resume] 이전 완료 태스크 (${previouslyCompleted.length}개):`);
-      previouslyCompleted.forEach((t) => console.log(`   ✅ ${t}`));
-    }
-    allTasks = goData.tasks;
-    pendingTasks = goData.pendingTasks;
+  allTasks = runtimeTaskContext.taskNames.length > 0
+    ? [...runtimeTaskContext.taskNames]
+    : ['requirements 기반 다음 최우선 작업 실행'];
+  if (enforceTestCompletion) {
+    allTasks.push('모든 테스트 완료');
   }
+  previouslyCompleted = [];
+  pendingTasks = [...allTasks];
+
+  console.log(`📄 mode: infinite-context`);
+  console.log(`📄 agent.md: ${path.resolve(agentFilePath)}`);
+  console.log(`📄 requirements.md: ${path.resolve(requirementsFilePath)}`);
+  console.log(`📄 runtime task source: infinite-context${runtimeTaskContext.usedFallback ? ' (local backup fallback)' : ''}`);
+  if (process.env.DESIGN_DIR) {
+    console.log(`📁 DESIGN_DIR: ${path.resolve(process.cwd(), process.env.DESIGN_DIR)}`);
+  }
+  console.log('📝 태스크: 무한 컨텍스트 기반 자율 진행');
 
   if (pendingTasks.length === 0) {
-    console.log('\n✅ go.md의 모든 태스크가 완료되었습니다.');
-    console.log('   새로운 작업을 추가하려면 go.md를 수정하세요.');
+    console.log('\n✅ goal.md의 모든 태스크가 완료되었습니다.');
+    console.log('   새로운 작업을 추가하려면 goal.md를 수정하세요.');
     process.exit(0);
   }
 
@@ -114,7 +105,7 @@ async function main() {
   const initialState = {
     messages: [
       new HumanMessage(
-        `[세션 ${sessionNumber}] go.md 기반 자율 실행 시작.\n\n` +
+        `[세션 ${sessionNumber}] goal.md 기반 자율 실행 시작.\n\n` +
         `실행 모드: ${executionMode}\n` +
         `전체 태스크:\n${allTasks.map((t, i) => `${i + 1}. ${t}`).join('\n')}\n\n` +
         `이미 완료된 태스크: ${previouslyCompleted.join(', ') || '없음'}\n\n` +
@@ -137,28 +128,16 @@ async function main() {
   const handoffTriggered = result.handoffTriggered ?? false;
 
   printResult({ handoffTriggered, finalCompleted, finalPending, changedFiles: result.changedFiles });
+  await saveSessionResult({
+    sessionNumber,
+    executionMode,
+    result,
+    finalCompleted,
+    finalPending,
+  });
 
-  // ─── go.md 업데이트 ──────────────────────────────────────
-  const exitReason = handoffTriggered
-    ? '컨텍스트 토큰 임계치 도달'
-    : finalPending.length === 0
-      ? '모든 태스크 완료'
-      : '정상 종료';
-
-  if (!isInfiniteContextMode) {
-    await writeGoProgress({
-      goFilePath,
-      completedTasks: finalCompleted,
-      pendingTasks:   finalPending,
-      allTasks,
-      changedFiles:   result.changedFiles ?? [],
-      contextMonitor,
-      exitReason,
-      sessionNumber,
-    });
-  } else {
-    console.log('[Main] infinite-context 모드: go.md 진행상황 기록은 생략');
-  }
+  // ─── 결과 반영 ─────────────────────────────────────────────
+  console.log('[Main] infinite-context 전용 모드: goal.md 진행상황 기록은 생략');
 
   // ─── 다음 세션 시작 여부 판단 ────────────────────────────
   const hasMoreWork = finalPending.length > 0;
@@ -167,29 +146,111 @@ async function main() {
     console.log(`\n[Main] 남은 태스크 ${finalPending.length}개 → 새 세션 자동 시작`);
     launchNextSession({ sessionNumber: sessionNumber + 1, delayMs: 3000 });
   } else if (!hasMoreWork) {
-    console.log('\n🎉 go.md의 모든 태스크를 완료했습니다!');
-    console.log('   새로운 작업을 추가하려면 go.md를 수정하고 npm start를 실행하세요.');
+    console.log('\n🎉 현재 세션 태스크를 완료했습니다.');
+    console.log('   다음 작업은 requirements.md 기준으로 이어서 진행됩니다.');
   } else {
     console.log('\n[Main] AUTO_RESTART=false — 자동 재시작 비활성화');
     console.log('   npm start를 다시 실행하면 남은 태스크를 이어서 진행합니다.');
   }
 }
 
+async function saveSessionResult({ sessionNumber, executionMode, result, finalCompleted, finalPending }) {
+  const resultDir = resolveResultDir(process.cwd());
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const filename = `session-${String(sessionNumber).padStart(3, '0')}-${timestamp}.json`;
+  const filePath = path.join(resultDir, filename);
+
+  const payload = {
+    savedAt: new Date().toISOString(),
+    sessionNumber,
+    executionMode,
+    completedTaskCount: finalCompleted.length,
+    pendingTaskCount: finalPending.length,
+    completedTasks: finalCompleted,
+    pendingTasks: finalPending,
+    changedFiles: result?.changedFiles ?? [],
+    handoffTriggered: result?.handoffTriggered ?? false,
+  };
+
+  await fs.mkdir(resultDir, { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(payload, null, 2), 'utf-8');
+  console.log(`📦 실행 결과 저장: ${filePath}`);
+}
+
+async function loadRuntimeTaskContext(cwd) {
+  const raw = await loadTaskDocsFromInfiniteContext('task-doc');
+  let docs = extractTaskDocs(raw);
+  let usedFallback = false;
+
+  if (docs.length === 0) {
+    const fallback = await loadTaskBackup(cwd);
+    docs = fallback;
+    usedFallback = fallback.length > 0;
+  }
+
+  const taskNames = docs.map((doc, index) => normalizeTaskName(doc.name, index + 1));
+  const bundle = docs
+    .map((doc, index) => `### ${index + 1}. ${doc.name}\n\n${doc.content}`)
+    .join('\n\n---\n\n');
+
+  return { taskNames, bundle, usedFallback };
+}
+
+function extractTaskDocs(rawText) {
+  const text = (rawText ?? '').trim();
+  if (!text) return [];
+
+  const chunks = text.split(/\[task-doc\]/g).map((item) => item.trim()).filter(Boolean);
+  const docs = [];
+  for (const chunk of chunks) {
+    const lines = chunk.split('\n');
+    const nameLine = lines.find((line) => /^name:\s*/i.test(line));
+    const name = nameLine ? nameLine.replace(/^name:\s*/i, '').trim() : '';
+    const contentStart = lines.findIndex((line) => line.trim() === '');
+    const content = contentStart >= 0 ? lines.slice(contentStart + 1).join('\n').trim() : chunk;
+    if (name && content) docs.push({ name, content });
+  }
+  return docs.slice(0, 100);
+}
+
+async function loadTaskBackup(cwd) {
+  const taskDir = path.resolve(cwd, process.env.TASK_DIR ?? './task');
+  const exportPath = path.resolve(taskDir, '.task-memory-export.json');
+  try {
+    const raw = await fs.readFile(exportPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed?.rows)) return [];
+    return parsed.rows
+      .map((row) => ({ name: `${row?.name ?? ''}`.trim(), content: `${row?.content ?? ''}`.trim() }))
+      .filter((row) => row.name && row.content);
+  } catch {
+    return [];
+  }
+}
+
+function normalizeTaskName(name, index) {
+  const cleaned = String(name ?? '')
+    .replace(/\.md$/i, '')
+    .replace(/^\d+\.\s*/, '')
+    .trim();
+  return cleaned ? `task ${index}: ${cleaned}` : `task ${index}`;
+}
+
 function printBanner(sessionNumber) {
   console.log('╔═══════════════════════════════════════════════════╗');
   console.log(`║   자율 에이전트 실행 시스템 — 세션 ${String(sessionNumber).padEnd(14)}║`);
-  console.log('║   go.md 기반 | LangChain + claude/gemini/codex   ║');
+  console.log('║ infinite-context | LangChain + claude/gemini/codex ║');
   console.log('╚═══════════════════════════════════════════════════╝\n');
 }
 
 function printResult({ handoffTriggered, finalCompleted, finalPending, changedFiles }) {
   console.log('\n╔═══════════════════════════════════════════════════╗');
   if (handoffTriggered) {
-    console.log('║   ⚠️  컨텍스트 한도 도달 — go.md 기록 후 재시작   ║');
+    console.log('║   ⚠️  컨텍스트 한도 도달 — 핸드오프 후 재시작      ║');
   } else if (finalPending.length === 0) {
     console.log('║   ✅ 모든 태스크 완료!                            ║');
   } else {
-    console.log('║   🔄 사이클 종료 — go.md 기록 후 재시작          ║');
+    console.log('║   🔄 사이클 종료 — 다음 세션으로 재시작             ║');
   }
   console.log('╚═══════════════════════════════════════════════════╝\n');
 

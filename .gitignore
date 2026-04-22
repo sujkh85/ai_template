@@ -2,3 +2,6 @@ node_modules/
 .env
 output/
 design/
+task/
+result/
+data/

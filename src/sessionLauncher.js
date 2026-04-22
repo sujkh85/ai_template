@@ -1,6 +1,6 @@
 /**
  * 현재 세션 종료 후 새 Node.js 프로세스를 스폰하여 다음 세션을 시작합니다.
- * 새 프로세스는 업데이트된 go.md를 읽고 남은 태스크를 이어서 실행합니다.
+ * 새 프로세스는 업데이트된 goal.md를 읽고 남은 태스크를 이어서 실행합니다.
  */
 
 import { spawn } from 'child_process';
@@ -22,7 +22,7 @@ export function launchNextSession({ sessionNumber = 1, delayMs = 2000 } = {}) {
   setTimeout(() => {
     const entryPoint = path.join(__dirname, 'index.js');
 
-    // 환경변수 복사 (HANDOFF_FILE 제거 — go.md에서 직접 복원)
+    // 환경변수 복사 (HANDOFF_FILE 제거 — goal.md에서 직접 복원)
     const env = { ...process.env };
     delete env.HANDOFF_FILE;
 

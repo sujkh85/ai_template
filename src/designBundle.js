@@ -1,6 +1,6 @@
 /**
  * DESIGN_DIR 환경변수가 있으면 해당 폴더 아래 마크다운을 읽어
- * go.md userContent 뒤에 붙일 참조 텍스트를 만듭니다.
+ * goal.md userContent 뒤에 붙일 참조 텍스트를 만듭니다.
  */
 
 import fs from 'fs/promises';
@@ -69,7 +69,7 @@ export async function loadDesignBundle({ cwd }) {
 
   return (
     `\n\n---\n\n## 디자인 문서 번들 (자동 주입)\n\n` +
-    `> WORKER는 아래 문서를 **기획·제약의 단일 출처**로 참고하세요. go.md 태스크와 충돌하면 go.md를 우선합니다.\n\n` +
+    `> WORKER는 아래 문서를 **기획·제약의 단일 출처**로 참고하세요. goal.md 태스크와 충돌하면 goal.md를 우선합니다.\n\n` +
     chunks.join('\n\n---\n\n')
   );
 }

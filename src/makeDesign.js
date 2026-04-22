@@ -1,184 +1,361 @@
 import './loadEnv.js';
 import fs from 'fs/promises';
 import path from 'path';
-import { withOllamaFallback } from './cliRunner.js';
+import { withOllamaFallback, persistInfiniteContextHandoff } from './cliRunner.js';
 import { getCliRunner } from './agentConfig.js';
 
-const DEFAULT_CONCEPT_FILE = './concept.md';
+const DEFAULT_GOAL_FILE = './goal.md';
 const DEFAULT_OUTPUT_DIR = './design';
-const DEFAULT_OUTPUT_FILE = 'design-plan.md';
+const DEFAULT_PLAN_COUNT = 6;
+const DEFAULT_CHECKPOINT_FILE = '.make-design-session.json';
 
 async function main() {
   const cwd = process.cwd();
-  const conceptPath = path.resolve(cwd, process.env.DESIGN_CONCEPT_FILE ?? DEFAULT_CONCEPT_FILE);
+  const goalPath = path.resolve(cwd, process.env.DESIGN_SOURCE_GOAL_FILE ?? process.env.GO_FILE ?? DEFAULT_GOAL_FILE);
   const outputDir = path.resolve(cwd, process.env.DESIGN_DIR ?? DEFAULT_OUTPUT_DIR);
-  const outputFile = path.resolve(outputDir, process.env.DESIGN_OUTPUT_FILE ?? DEFAULT_OUTPUT_FILE);
-
-  const concept = await readConcept(conceptPath);
+  const checkpointPath = path.resolve(outputDir, DEFAULT_CHECKPOINT_FILE);
+  const maxFilesPerSession = Number(process.env.DESIGN_MAX_FILES_PER_SESSION ?? 3);
   const { ai, run } = getCliRunner('design', process.env.DESIGN_AI ?? process.env.WORKER_AI ?? 'claude');
-
-  console.log(`[MakeDesign] concept: ${conceptPath}`);
-  console.log(`[MakeDesign] output: ${outputFile}`);
-  console.log(`[MakeDesign] ai: ${ai}`);
-
-  const prompt = buildPrompt({ concept, conceptPath, outputFile });
-  const { text } = await withOllamaFallback(run, ai, prompt);
-  const designDoc = normalizeDocument(text) || buildFallbackDesignDoc(concept);
+  const continueInProcess = process.env.DESIGN_CONTINUE_IN_PROCESS !== 'false';
 
   await fs.mkdir(outputDir, { recursive: true });
-  await fs.writeFile(outputFile, designDoc, 'utf-8');
 
-  console.log(`[MakeDesign] written: ${outputFile}`);
-}
+  const goalContent = await readGoal(goalPath);
+  while (true) {
+    const session = await runSingleDesignSession({
+      goalPath,
+      goalContent,
+      outputDir,
+      checkpointPath,
+      maxFilesPerSession,
+      run,
+      ai,
+    });
 
-async function readConcept(filePath) {
-  try {
-    return await fs.readFile(filePath, 'utf-8');
-  } catch (error) {
-    throw new Error(`concept.md 파일을 읽을 수 없습니다: ${filePath}\n${error.message}`);
+    if (session.done) {
+      return;
+    }
+
+    if (!continueInProcess) {
+      console.log('[MakeDesign] 컨텍스트 한도 대비를 위해 체크포인트 저장 후 새 세션으로 이어갑니다.');
+      launchNextMakeDesignSession();
+      return;
+    }
+
+    console.log('[MakeDesign] 체크포인트에서 같은 프로세스로 다음 세션을 이어서 실행합니다.');
   }
 }
 
-function buildPrompt({ concept, conceptPath, outputFile }) {
+async function runSingleDesignSession({
+  goalPath,
+  goalContent,
+  outputDir,
+  checkpointPath,
+  maxFilesPerSession,
+  run,
+  ai,
+}) {
+  const checkpoint = await readCheckpoint(checkpointPath);
+
+  const plan = checkpoint?.plan?.length
+    ? checkpoint.plan
+    : await buildDesignPlan({ goalContent, goalPath, run, ai });
+
+  const startIndex = Number(checkpoint?.nextIndex ?? 0);
+  const endIndexExclusive = Math.min(startIndex + maxFilesPerSession, plan.length);
+
+  console.log(`[MakeDesign] source: ${goalPath}`);
+  console.log(`[MakeDesign] outputDir: ${outputDir}`);
+  console.log(`[MakeDesign] ai: ${ai}`);
+  console.log(`[MakeDesign] plan count: ${plan.length}`);
+  console.log(`[MakeDesign] session range: ${startIndex + 1}..${endIndexExclusive}`);
+
+  for (let i = startIndex; i < endIndexExclusive; i += 1) {
+    const item = plan[i];
+    const filename = buildNumberedFilename(i + 1, item.filename, item.title);
+    const filePath = path.resolve(outputDir, filename);
+
+    const alreadyCreated = await readExistingDesignFiles(outputDir);
+    const prompt = buildDesignFilePrompt({
+      goalPath,
+      goalContent,
+      outputDir,
+      item,
+      index: i + 1,
+      alreadyCreated,
+    });
+
+    const { text } = await withOllamaFallback(run, ai, prompt);
+    const content = normalizeDocument(text) || buildFallbackDesignSection({ goalContent, item, index: i + 1 });
+
+    await fs.writeFile(filePath, content, 'utf-8');
+    console.log(`[MakeDesign] written: ${filePath}`);
+  }
+
+  const done = endIndexExclusive >= plan.length;
+
+  if (done) {
+    await safeUnlink(checkpointPath);
+    console.log('[MakeDesign] 모든 design 문서 생성 완료');
+    return { done: true };
+  }
+
+  await writeCheckpoint(checkpointPath, {
+    source: goalPath,
+    outputDir,
+    plan,
+    nextIndex: endIndexExclusive,
+    updatedAt: new Date().toISOString(),
+    note: 'infinite-context handoff checkpoint',
+  });
+
+  await persistInfiniteContextHandoff(
+    [
+      '[make-design handoff]',
+      `source: ${goalPath}`,
+      `nextIndex: ${endIndexExclusive}`,
+      `total: ${plan.length}`,
+      'nextAction: resume make-design and continue remaining design files',
+    ].join('\n'),
+    {
+      stage: 'make-design',
+      nextIndex: endIndexExclusive,
+      total: plan.length,
+    },
+  );
+
+  return { done: false };
+}
+
+async function readGoal(filePath) {
+  try {
+    return await fs.readFile(filePath, 'utf-8');
+  } catch (error) {
+    throw new Error(`goal.md 파일을 읽을 수 없습니다: ${filePath}\n${error.message}`);
+  }
+}
+
+async function readCheckpoint(filePath) {
+  try {
+    const raw = await fs.readFile(filePath, 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function writeCheckpoint(filePath, payload) {
+  await fs.writeFile(filePath, JSON.stringify(payload, null, 2), 'utf-8');
+}
+
+async function safeUnlink(filePath) {
+  try {
+    await fs.unlink(filePath);
+  } catch {
+    // ignore
+  }
+}
+
+function launchNextMakeDesignSession() {
+  const nextEntry = path.resolve(process.cwd(), 'src/makeDesign.js');
+  const message = [
+    '[MakeDesign] 새 프로세스 재시작 경로는 안정성 문제로 기본 비활성화되었습니다.',
+    `[MakeDesign] 필요 시 다음 명령으로 수동 재개하세요: ${process.execPath} ${nextEntry}`,
+  ].join('\n');
+  console.warn(message);
+}
+
+async function buildDesignPlan({ goalContent, goalPath, run, ai }) {
+  const prompt = [
+    '당신은 구현 가능한 상세 설계 문서를 분할하는 아키텍트입니다.',
+    'goal.md를 읽고 구현 가능한 수준의 상세 설계 문서 파일 계획을 JSON 배열로 출력하세요.',
+    '',
+    '반드시 지킬 규칙:',
+    '- 출력은 JSON 배열만 허용합니다.',
+    '- 각 항목은 { "title": "...", "filename": "...", "focus": "..." } 구조여야 합니다.',
+    '- 총 4~10개 항목으로 구성하세요.',
+    '- filename은 영문 소문자 kebab-case + .md 형식이어야 합니다.',
+    '- title은 한국어로 작성하세요.',
+    '- goal.md의 요구사항을 구현 가능한 단위로 나누세요.',
+    '',
+    `입력 파일: ${goalPath}`,
+    '',
+    'goal.md 원문:',
+    goalContent,
+  ].join('\n');
+
+  const { text } = await withOllamaFallback(run, ai, prompt);
+  const parsed = parsePlanJson(text);
+  if (parsed.length > 0) return parsed;
+  return buildFallbackPlan(goalContent);
+}
+
+function parsePlanJson(text) {
+  const raw = (text ?? '').trim();
+  if (!raw) return [];
+
+  const fenced = raw.match(/```(?:json)?\n([\s\S]*?)```/i);
+  const body = fenced ? fenced[1].trim() : raw;
+
+  try {
+    const arr = JSON.parse(body);
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((item) => ({
+        title: `${item?.title ?? ''}`.trim(),
+        filename: `${item?.filename ?? ''}`.trim(),
+        focus: `${item?.focus ?? ''}`.trim(),
+      }))
+      .filter((item) => item.title);
+  } catch {
+    return [];
+  }
+}
+
+function buildFallbackPlan(goalContent) {
+  const seeds = extractSectionTitles(goalContent).slice(0, DEFAULT_PLAN_COUNT);
+  const base = seeds.length > 0 ? seeds : [
+    '프로젝트 개요 및 범위',
+    '핵심 사용자 플로우',
+    '데이터 모델 및 상태',
+    'API 및 인터페이스',
+    '화면 설계',
+    '테스트 및 운영 계획',
+  ];
+
+  return base.map((title, index) => ({
+    title,
+    filename: `design-${String(index + 1).padStart(2, '0')}.md`,
+    focus: `${title}의 구현 상세 설계`,
+  }));
+}
+
+function extractSectionTitles(markdown) {
+  return markdown
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /^##+\s+/.test(line))
+    .map((line) => line.replace(/^##+\s+/, '').replace(/^\d+\.\s*/, '').trim())
+    .filter(Boolean);
+}
+
+function buildNumberedFilename(index, filename, title) {
+  const safe = sanitizeFilename(filename || title || `design-${index}`);
+  return `${index}. ${safe}`;
+}
+
+function sanitizeFilename(value) {
+  const base = String(value)
+    .toLowerCase()
+    .replace(/\.md$/i, '')
+    .replace(/[^a-z0-9-_\s]/g, ' ')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return `${base || 'design'}.md`;
+}
+
+async function readExistingDesignFiles(outputDir) {
+  const entries = await fs.readdir(outputDir, { withFileTypes: true });
+  const files = entries
+    .filter((entry) => entry.isFile() && /\.md$/i.test(entry.name) && !entry.name.startsWith('.'))
+    .map((entry) => entry.name)
+    .sort((a, b) => a.localeCompare(b, 'en'));
+
+  const snippets = [];
+  for (const name of files.slice(0, 20)) {
+    const text = await fs.readFile(path.resolve(outputDir, name), 'utf-8');
+    snippets.push(`### ${name}\n${text.slice(0, 1200)}`);
+  }
+  return snippets.join('\n\n---\n\n');
+}
+
+function buildDesignFilePrompt({ goalPath, goalContent, outputDir, item, index, alreadyCreated }) {
   return [
-    '당신은 서비스 기획자입니다.',
-    '아래 concept.md를 읽고 바로 실행 가능한 한국어 기획서를 마크다운으로 작성하세요.',
-    '설명 문장 외의 메타 발언은 금지합니다.',
-    `입력 파일: ${conceptPath}`,
-    `출력 파일: ${outputFile}`,
+    '당신은 시니어 소프트웨어 아키텍트입니다.',
+    'goal.md를 기반으로 개발자가 즉시 구현 가능한 상세 설계 문서를 작성하세요.',
     '',
-    '반드시 아래 구조를 지키세요.',
-    '# 서비스명',
-    '## 1. 프로젝트 개요',
-    '## 2. 문제 정의',
-    '## 3. 타깃 사용자',
-    '## 4. 핵심 가치 제안',
-    '## 5. 사용자 시나리오',
-    '## 6. 핵심 기능',
-    '## 7. 화면/콘텐츠 기획',
-    '## 8. 수익화 또는 운영 전략',
-    '## 9. MVP 범위',
-    '## 10. 성공 지표',
-    '## 11. 리스크와 대응',
-    '## 12. 다음 실행 항목',
+    '중요 요구사항:',
+    '- 이번 출력은 하나의 마크다운 문서 본문만 출력하세요.',
+    '- 문서는 반드시 한국어로 작성하세요.',
+    '- 내용은 구현 가능한 수준으로 매우 구체적이어야 합니다.',
+    '- 섹션마다 입력/출력, 예외 케이스, 수용 기준을 포함하세요.',
+    '- 설계 대상 밖의 추측은 "가정"으로 표시하세요.',
+    '- 실행 모드는 infinite-context입니다. 컨텍스트가 커지면 핵심 결정을 메모리로 남기고 이어서 작업한다고 가정하고 일관성을 유지하세요.',
     '',
-    '요구사항:',
-    '- concept.md에 없는 내용은 단정하지 말고, 필요한 경우 "가정"으로 표시하세요.',
-    '- 각 섹션은 실행 가능한 수준으로 구체적으로 작성하세요.',
-    '- 핵심 기능 섹션은 우선순위가 드러나게 표 형태로 작성하세요.',
-    '- 화면/콘텐츠 기획에는 최소 5개 화면 또는 콘텐츠 블록을 포함하세요.',
-    '- 다음 실행 항목은 체크리스트 형식으로 작성하세요.',
+    `입력 파일: ${goalPath}`,
+    `출력 파일: ${path.resolve(outputDir, buildNumberedFilename(index, item.filename, item.title))}`,
+    `이번 문서 번호: ${index}`,
+    `문서 제목: ${item.title}`,
+    `문서 초점: ${item.focus || item.title}`,
     '',
-    'concept.md 원문:',
-    concept,
+    '필수 문서 구조:',
+    `# ${index}. ${item.title}`,
+    '## 목적과 범위',
+    '## 상세 요구사항',
+    '## 기능/컴포넌트 설계',
+    '## 데이터 계약 (입출력/스키마)',
+    '## 예외 및 실패 처리',
+    '## 구현 단계 (체크리스트)',
+    '## 테스트 기준',
+    '## 오픈 이슈',
+    '',
+    '이미 생성된 design 문서 일부 요약:',
+    alreadyCreated || '(없음)',
+    '',
+    'goal.md 원문:',
+    goalContent,
   ].join('\n');
 }
 
 function normalizeDocument(text) {
   const trimmed = (text ?? '').trim();
   if (!trimmed) return '';
-
   const fenced = trimmed.match(/```(?:md|markdown)?\n([\s\S]*?)```/i);
   return (fenced ? fenced[1] : trimmed).trim();
 }
 
-function buildFallbackDesignDoc(concept) {
-  const title = extractTitle(concept);
-  const bullets = extractBullets(concept);
-  const assumptions = bullets.length > 0 ? bullets : ['구체 요구사항은 concept.md 보강이 필요함'];
-
+function buildFallbackDesignSection({ goalContent, item, index }) {
+  const short = goalContent.replace(/\r/g, '').slice(0, 2000);
   return [
-    `# ${title}`,
+    `# ${index}. ${item.title}`,
     '',
-    '## 1. 프로젝트 개요',
-    `- 목표: ${firstSentence(concept) || '아이디어를 검증 가능한 서비스 기획으로 구체화한다.'}`,
-    '- 산출물: MVP 중심의 서비스 기획서 초안',
-    '- 참고: AI 생성 실패 시 로컬 템플릿으로 작성된 초안',
+    '## 목적과 범위',
+    `- 이 문서는 "${item.title}" 구현에 필요한 상세 설계를 제공한다.`,
+    `- 초점: ${item.focus || item.title}`,
     '',
-    '## 2. 문제 정의',
-    '- 사용자가 해결하려는 핵심 문제를 한 문장으로 다시 정리해야 한다.',
-    '- 현재 concept.md에는 시장/경쟁/운영 제약 정보가 제한적일 수 있다.',
+    '## 상세 요구사항',
+    '- goal.md의 관련 태스크를 기능 단위로 분해한다.',
+    '- 각 기능의 성공 조건과 완료 기준을 정의한다.',
     '',
-    '## 3. 타깃 사용자',
-    '- 1차 타깃: concept.md에서 직접 언급된 핵심 사용자군',
-    '- 2차 타깃: 초기 확장 가능성이 있는 인접 사용자군',
+    '## 기능/컴포넌트 설계',
+    '- 컴포넌트 경계와 책임을 명시한다.',
+    '- 외부 의존성과 연결 지점을 식별한다.',
     '',
-    '## 4. 핵심 가치 제안',
-    '- 사용자에게 제공할 가장 강한 효익 1개를 명확히 정의한다.',
-    '- 경쟁 대안 대비 더 빠르거나, 더 쉽거나, 더 신뢰할 수 있어야 한다.',
+    '## 데이터 계약 (입출력/스키마)',
+    '- 입력 파라미터, 출력 구조, 검증 규칙을 정의한다.',
+    '- 오류 응답 포맷과 메시지 정책을 포함한다.',
     '',
-    '## 5. 사용자 시나리오',
-    '1. 사용자가 서비스에 유입된다.',
-    '2. 핵심 가치를 이해하고 첫 행동을 수행한다.',
-    '3. 결과를 확인하고 재방문 동기를 얻는다.',
+    '## 예외 및 실패 처리',
+    '- 실패 시 재시도 정책과 롤백 기준을 정의한다.',
+    '- 사용자/운영자 관점의 오류 대응 플로우를 구분한다.',
     '',
-    '## 6. 핵심 기능',
-    '| 우선순위 | 기능 | 목적 | 비고 |',
-    '| --- | --- | --- | --- |',
-    '| P0 | 핵심 문제 해결 기능 | 서비스 존재 이유 검증 | 가정 기반 |',
-    '| P0 | 온보딩/입력 흐름 | 첫 사용 이탈 방지 | 가정 기반 |',
-    '| P1 | 결과 확인/공유 | 재사용과 확산 유도 | 가정 기반 |',
-    '| P1 | 운영자 관리 도구 | 운영 효율 확보 | 가정 기반 |',
+    '## 구현 단계 (체크리스트)',
+    '- [ ] 핵심 로직 구현',
+    '- [ ] 경계 조건 처리',
+    '- [ ] 테스트 코드 추가',
+    '- [ ] 문서/로그 정리',
     '',
-    '## 7. 화면/콘텐츠 기획',
-    '- 랜딩/소개 화면: 문제와 핵심 가치를 짧게 전달',
-    '- 가입/온보딩 화면: 사용자 정보 및 목적 수집',
-    '- 메인 작업 화면: 핵심 기능 실행',
-    '- 결과 화면: 성과, 추천 액션, 저장/공유 제공',
-    '- 마이페이지 또는 히스토리 화면: 재사용성과 리텐션 확보',
-    '- 운영/관리 화면: 데이터 확인 및 콘텐츠 관리',
+    '## 테스트 기준',
+    '- 정상 케이스, 경계 케이스, 실패 케이스를 각각 검증한다.',
+    '- 회귀 테스트 기준을 명시한다.',
     '',
-    '## 8. 수익화 또는 운영 전략',
-    '- 초기에는 사용성 검증이 우선이며, 유료화는 후순위로 둔다.',
-    '- 운영 기준, 고객 응대 기준, 콘텐츠 업데이트 기준을 문서화한다.',
+    '## 오픈 이슈',
+    '- goal.md 기반 추가 상세화가 필요한 항목을 기록한다.',
     '',
-    '## 9. MVP 범위',
-    '- 반드시 필요한 흐름만 포함한다.',
-    '- 수동 운영으로 대체 가능한 자동화는 후순위로 미룬다.',
-    '- 외부 연동은 검증에 꼭 필요한 경우에만 포함한다.',
-    '',
-    '## 10. 성공 지표',
-    '- 방문 대비 핵심 행동 전환율',
-    '- 첫 사용 완료율',
-    '- 7일 재방문율',
-    '- 사용자 피드백의 긍정/부정 비율',
-    '',
-    '## 11. 리스크와 대응',
-    '- 요구사항 불명확: concept.md 상세화 및 인터뷰로 보완',
-    '- 가치 제안 약함: 경쟁 대안 대비 차별점 재정의',
-    '- 개발 범위 과다: P0/P1 기준으로 MVP 재절단',
-    '',
-    '## 12. 다음 실행 항목',
-    '- [ ] 타깃 사용자와 핵심 문제를 한 문장으로 재정의',
-    '- [ ] P0 기능 3개 이내로 MVP 범위 고정',
-    '- [ ] 화면 흐름 와이어 초안 작성',
-    '- [ ] 데이터/운영 정책 초안 작성',
-    '- [ ] go.md에 구현 태스크로 분해',
-    '',
-    '## 가정',
-    ...assumptions.map((item) => `- ${item}`),
+    '## 참고 (goal.md 발췌)',
+    short,
   ].join('\n');
-}
-
-function extractTitle(markdown) {
-  const match = markdown.match(/^#\s+(.+)$/m);
-  return match ? match[1].trim() : '서비스 기획서';
-}
-
-function firstSentence(text) {
-  const cleaned = text.replace(/\r/g, ' ').replace(/\n+/g, ' ').trim();
-  if (!cleaned) return '';
-  const sentence = cleaned.split(/(?<=[.!?])\s+/)[0];
-  return sentence.slice(0, 180);
-}
-
-function extractBullets(markdown) {
-  return markdown
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => /^[-*]\s+/.test(line))
-    .map((line) => line.replace(/^[-*]\s+/, ''))
-    .slice(0, 8);
 }
 
 main().catch((error) => {

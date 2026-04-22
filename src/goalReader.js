@@ -1,7 +1,7 @@
 /**
- * go.md 파일을 읽고 파싱합니다.
+ * goal.md 파일을 읽고 파싱합니다.
  *
- * go.md 구조:
+ * goal.md 구조:
  *   [사용자 작성 영역]  ← 태스크 정의, ### 헤더로 태스크 구분
  *   <!-- AUTO-GENERATED -->  ← 이 아래는 자동 생성 (무시)
  *   [진행 상황 / 세션 로그]  ← 완료 태스크 복원에 사용
@@ -13,7 +13,7 @@ import path from 'path';
 const AUTO_SEPARATOR = '<!-- AUTO-GENERATED:';
 
 /**
- * go.md 파일을 읽어 내용, 태스크 목록, 완료 태스크를 반환합니다.
+ * goal.md 파일을 읽어 내용, 태스크 목록, 완료 태스크를 반환합니다.
  *
  * @returns {{
  *   content: string,       전체 파일 내용
@@ -32,7 +32,7 @@ export async function readGoFile(goFilePath) {
   try {
     content = await fs.readFile(resolved, 'utf-8');
   } catch (err) {
-    throw new Error(`go.md 파일을 읽을 수 없습니다: ${resolved}\n${err.message}`);
+    throw new Error(`goal.md 파일을 읽을 수 없습니다: ${resolved}\n${err.message}`);
   }
 
   // 사용자 영역 / 자동 생성 영역 분리
@@ -59,15 +59,15 @@ export async function readGoFile(goFilePath) {
 }
 
 /**
- * go.md 사용자 영역에서 H1 제목을 추출합니다.
+ * goal.md 사용자 영역에서 H1 제목을 추출합니다.
  */
 function extractTitle(userContent) {
   const match = userContent.match(/^#\s+(.+)/m);
-  return match ? match[1].trim() : 'go.md 작업';
+  return match ? match[1].trim() : 'goal.md 작업';
 }
 
 /**
- * go.md 사용자 영역에서 ### 태스크 항목들을 추출합니다.
+ * goal.md 사용자 영역에서 ### 태스크 항목들을 추출합니다.
  * AUTO-GENERATED 구분선 이전 영역만 스캔합니다.
  */
 function extractTasks(userContent) {
@@ -138,7 +138,7 @@ function extractSection(content, header) {
 }
 
 /**
- * 완료 키워드를 go.md의 태스크 이름에서 생성합니다.
+ * 완료 키워드를 goal.md의 태스크 이름에서 생성합니다.
  * 에이전트는 이 키워드를 출력하면 완료로 간주됩니다.
  */
 export function getCompletionKeyword(taskName) {
@@ -152,7 +152,7 @@ export function getCompletionKeyword(taskName) {
 }
 
 /**
- * Worker 출력에 go.md에서 요구한 태스크 완료 문구가 있는지 판별합니다.
+ * Worker 출력에 goal.md에서 요구한 태스크 완료 문구가 있는지 판별합니다.
  * 임의의 "완료" 단어만으로는 완료 처리하지 않습니다.
  *
  * @param {string} output

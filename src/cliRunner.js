@@ -5,15 +5,120 @@
  */
 
 import { randomBytes } from 'crypto';
-import { writeFile, unlink } from 'fs/promises';
+import { writeFile, unlink, readdir, stat } from 'fs/promises';
+import { mkdirSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { basename, join, resolve, relative, isAbsolute } from 'path';
 import { spawn } from 'child_process';
+import { MultiServerMCPClient } from '@langchain/mcp-adapters';
 
-const CWD = process.cwd();
+const PROJECT_CWD = process.cwd();
+const RESULT_DIR = resolveResultDir(PROJECT_CWD, process.env.RESULT_DIR ?? './result');
+const CWD = RESULT_DIR;
 const CLI_TIMEOUT_MS = Number(process.env.CLI_TIMEOUT_MS ?? 600_000);
 const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'gemma3:12b';
+const EXECUTION_MODE = process.env.EXECUTION_MODE ?? 'infinite-context';
+const INFINITE_CONTEXT_SERVER = process.env.INFINITE_CONTEXT_SERVER_NAME ?? 'infinite-context';
+const INFINITE_CONTEXT_MCP_COMMAND = process.env.INFINITE_CONTEXT_MCP_COMMAND ?? 'npx';
+const INFINITE_CONTEXT_MCP_ARGS = (process.env.INFINITE_CONTEXT_MCP_ARGS ?? '-y infinite-context')
+  .split(' ')
+  .map((part) => part.trim())
+  .filter(Boolean);
+const ROOT_FOLDER_NAME = basename(PROJECT_CWD);
+const AUTO_SCOPE_ID = sanitizeScopeId(ROOT_FOLDER_NAME) || 'project';
+const WRITE_SCOPE_DIR = RESULT_DIR;
+const SNAPSHOT_IGNORE_DIRS = new Set(['.git', 'node_modules']);
+
+mkdirSync(RESULT_DIR, { recursive: true });
+
+function isPathInside(baseDir, targetPath) {
+  const rel = relative(baseDir, targetPath);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function normalizeRelPath(baseDir, targetPath) {
+  return relative(baseDir, targetPath).split('\\').join('/');
+}
+
+async function captureWorkspaceSnapshot(baseDir) {
+  const fileMap = new Map();
+
+  async function walk(currentDir) {
+    const entries = await readdir(currentDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const absolutePath = join(currentDir, entry.name);
+      const relPath = normalizeRelPath(baseDir, absolutePath);
+
+      if (relPath === '') continue;
+      if (isPathInside(WRITE_SCOPE_DIR, absolutePath)) continue;
+
+      if (entry.isDirectory()) {
+        if (SNAPSHOT_IGNORE_DIRS.has(entry.name)) continue;
+        await walk(absolutePath);
+        continue;
+      }
+
+      if (!entry.isFile()) continue;
+
+      const stats = await stat(absolutePath);
+      fileMap.set(relPath, `${stats.size}:${stats.mtimeMs}`);
+    }
+  }
+
+  await walk(baseDir);
+  return fileMap;
+}
+
+function detectWorkspaceViolations(beforeSnapshot, afterSnapshot) {
+  const violations = [];
+
+  for (const [relPath, signature] of afterSnapshot.entries()) {
+    if (!beforeSnapshot.has(relPath)) {
+      violations.push(`created ${relPath}`);
+      continue;
+    }
+    if (beforeSnapshot.get(relPath) !== signature) {
+      violations.push(`modified ${relPath}`);
+    }
+  }
+
+  for (const relPath of beforeSnapshot.keys()) {
+    if (!afterSnapshot.has(relPath)) {
+      violations.push(`deleted ${relPath}`);
+    }
+  }
+
+  return violations;
+}
+
+async function withWriteScopeGuard(label, runFn) {
+  const beforeSnapshot = await captureWorkspaceSnapshot(PROJECT_CWD);
+  const result = await runFn();
+  const afterSnapshot = await captureWorkspaceSnapshot(PROJECT_CWD);
+  const violations = detectWorkspaceViolations(beforeSnapshot, afterSnapshot);
+
+  if (violations.length > 0) {
+    const preview = violations.slice(0, 12).join('\n');
+    throw new Error(
+      `[${label}] 쓰기/삭제 권한 위반 감지: result/ 밖 변경은 금지됩니다.\n${preview}`,
+    );
+  }
+
+  return result;
+}
+
+function resolveResultDir(projectCwd, configuredPath) {
+  const absolute = resolve(projectCwd, configuredPath);
+  const rel = relative(projectCwd, absolute);
+  const isInsideProject = rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  if (!isInsideProject) {
+    throw new Error(`RESULT_DIR must be inside project root: ${absolute}`);
+  }
+  return absolute;
+}
+
+let mcpClientPromise;
 
 const USAGE_LIMIT_PATTERNS = [
   /usage limit/i,
@@ -85,13 +190,232 @@ function collectOutput(proc, label, timeoutMs, resolve, reject) {
   proc.on('error', (err) => { clearTimeout(timer); reject(err); });
 }
 
+async function getInfiniteContextClient() {
+  if (!mcpClientPromise) {
+    mcpClientPromise = Promise.resolve(
+      new MultiServerMCPClient({
+        onConnectionError: 'ignore',
+        useStandardContentBlocks: true,
+        mcpServers: {
+          [INFINITE_CONTEXT_SERVER]: {
+            transport: 'stdio',
+            command: INFINITE_CONTEXT_MCP_COMMAND,
+            args: INFINITE_CONTEXT_MCP_ARGS,
+          },
+        },
+      }),
+    );
+  }
+  return mcpClientPromise;
+}
+
+function getInfiniteContextScope() {
+  return {
+    project_id: AUTO_SCOPE_ID,
+    session_id: AUTO_SCOPE_ID,
+  };
+}
+
+function sanitizeScopeId(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+async function invokeFirstAvailableTool(toolNames, argVariants, timeout = 15_000) {
+  const client = await getInfiniteContextClient();
+  const tools = await client.getTools();
+  const tool = tools.find((t) => toolNames.includes(t.name));
+  if (!tool) return { ok: false, text: '', toolName: '' };
+
+  for (const args of argVariants) {
+    try {
+      const output = await tool.invoke(args, { timeout });
+      const text = normalizeToolText(output).trim();
+      return { ok: true, text, toolName: tool.name };
+    } catch {
+      // 서버별 인자 스키마 차이를 흡수하기 위해 다음 후보를 시도합니다.
+    }
+  }
+  return { ok: false, text: '', toolName: tool.name };
+}
+
+export async function persistInfiniteContextHandoff(note, metadata = {}) {
+  if (EXECUTION_MODE !== 'infinite-context') return false;
+  try {
+    const client = await getInfiniteContextClient();
+    const tools = await client.getTools();
+    const candidates = ['save_memory', 'memory_save', 'store_memory'];
+    const tool = tools.find((t) => candidates.includes(t.name));
+    if (!tool) return false;
+
+    const payload = typeof note === 'string' ? note : JSON.stringify(note);
+    const scope = getInfiniteContextScope();
+    const tryArgs = [
+      { key: 'make-design-handoff', content: payload, metadata, ...scope },
+      { content: payload, metadata },
+      { text: payload, metadata },
+      { memory: payload, metadata },
+    ];
+
+    for (const args of tryArgs) {
+      try {
+        await tool.invoke(args, { timeout: 15_000 });
+        return true;
+      } catch {
+        // 스키마 차이를 흡수하기 위해 여러 형태를 시도합니다.
+      }
+    }
+  } catch {
+    // MCP가 없으면 파일 체크포인트만으로 이어갑니다.
+  }
+  return false;
+}
+
+export async function saveTaskDocToInfiniteContext({ name, content, metadata = {} }) {
+  if (EXECUTION_MODE !== 'infinite-context') return false;
+  const payload = [
+    '[task-doc]',
+    `name: ${name}`,
+    `saved_at: ${new Date().toISOString()}`,
+    '',
+    content,
+  ].join('\n');
+
+  try {
+    const scope = getInfiniteContextScope();
+    const result = await invokeFirstAvailableTool(
+      ['save_memory', 'memory_save', 'store_memory'],
+      [
+        { key: `task-doc::${name}`, content: payload, metadata: { ...metadata, type: 'task-doc', name }, ...scope },
+        { content: payload, metadata: { ...metadata, type: 'task-doc', name } },
+        { text: payload, metadata: { ...metadata, type: 'task-doc', name } },
+        { memory: payload, metadata: { ...metadata, type: 'task-doc', name } },
+      ],
+    );
+    return result.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function loadTaskDocsFromInfiniteContext(query = 'task-doc') {
+  if (EXECUTION_MODE !== 'infinite-context') return '';
+  try {
+    const scope = getInfiniteContextScope();
+    const result = await invokeFirstAvailableTool(
+      ['search_and_inject_memory', 'inject_relevant_memories', 'memory_search'],
+      [
+        { task_description: query, top_k: 20, ...scope },
+        { query, topK: 20, ...scope },
+        { query, limit: 20 },
+        { query, limit: 20, ...scope },
+        { query, ...scope },
+        { query },
+        { text: query },
+        { input: query },
+      ],
+      20_000,
+    );
+    return result.text || '';
+  } catch {
+    return '';
+  }
+}
+
+function normalizeToolText(result) {
+  if (result == null) return '';
+  if (typeof result === 'string') return result;
+  if (Array.isArray(result)) return result.map((item) => normalizeToolText(item)).join('\n');
+  if (typeof result === 'object') {
+    if (typeof result.content === 'string') return result.content;
+    if (Array.isArray(result.content)) {
+      return result.content
+        .map((block) => {
+          if (typeof block === 'string') return block;
+          if (typeof block?.text === 'string') return block.text;
+          return '';
+        })
+        .filter(Boolean)
+        .join('\n');
+    }
+    return JSON.stringify(result);
+  }
+  return String(result);
+}
+
+async function readInfiniteContextMemory(prompt) {
+  if (EXECUTION_MODE !== 'infinite-context') return '';
+  try {
+    const client = await getInfiniteContextClient();
+    const tools = await client.getTools();
+    const candidates = ['search_and_inject_memory', 'inject_relevant_memories', 'memory_search'];
+    const tool = tools.find((t) => candidates.includes(t.name));
+    if (!tool) return '';
+
+    const query = String(prompt).slice(0, 700);
+    const scope = getInfiniteContextScope();
+    const tryArgs = [
+      { task_description: query, top_k: 5, ...scope },
+      { query, topK: 5, ...scope },
+      { query, limit: 5, ...scope },
+      { query, limit: 5 },
+      { query },
+      { text: query },
+      { input: query },
+    ];
+
+    for (const args of tryArgs) {
+      try {
+        const output = await tool.invoke(args, { timeout: 15_000 });
+        const text = normalizeToolText(output).trim();
+        if (text) return text.slice(0, 4000);
+      } catch {
+        // 다양한 MCP 서버 스키마 차이를 흡수하기 위해 다음 인자 형태를 시도합니다.
+      }
+    }
+  } catch {
+    // MCP 연결 실패 시 기본 프롬프트만 사용합니다.
+  }
+  return '';
+}
+
+export async function closeInfiniteContextClient() {
+  if (!mcpClientPromise) return;
+  try {
+    const client = await mcpClientPromise;
+    if (typeof client?.close === 'function') {
+      await client.close();
+    }
+  } catch {
+    // ignore close errors
+  } finally {
+    mcpClientPromise = undefined;
+  }
+}
+
+async function buildPromptWithInfiniteContext(prompt) {
+  const memoryContext = await readInfiniteContextMemory(prompt);
+  if (!memoryContext) return prompt;
+  return [
+    '[Infinite Context MCP Memory]',
+    memoryContext,
+    '',
+    '[Current Task]',
+    prompt,
+  ].join('\n');
+}
+
 /**
  * Claude CLI (PowerShell 경유)
  */
 export function runClaude(prompt, timeoutMs = CLI_TIMEOUT_MS) {
   console.log('[CLI] claude 실행 중...');
 
-  return (async () => {
+  return withWriteScopeGuard('claude', async () => {
     const built = buildPromptPipePowerShellCommand(
       'claude -p - --dangerously-skip-permissions',
     );
@@ -114,7 +438,7 @@ export function runClaude(prompt, timeoutMs = CLI_TIMEOUT_MS) {
       await unlink(built.filePath).catch(() => {});
       throw err;
     }
-  })();
+  });
 }
 
 /**
@@ -123,17 +447,19 @@ export function runClaude(prompt, timeoutMs = CLI_TIMEOUT_MS) {
 export function runGemini(prompt, timeoutMs = CLI_TIMEOUT_MS) {
   console.log('[CLI] gemini 실행 중...');
 
-  return new Promise((resolve, reject) => {
-    const proc = spawn('cmd.exe', ['/c', 'gemini', '-p', ' ', '--yolo'], {
-      cwd: CWD,
-      shell: false,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, FORCE_COLOR: '0' },
-    });
-    collectOutput(proc, 'gemini', timeoutMs, resolve, reject);
-    proc.stdin.write(prompt, 'utf-8');
-    proc.stdin.end();
-  });
+  return withWriteScopeGuard('gemini', () => (
+    new Promise((resolve, reject) => {
+      const proc = spawn('cmd.exe', ['/c', 'gemini', '-p', ' ', '--yolo'], {
+        cwd: CWD,
+        shell: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, FORCE_COLOR: '0' },
+      });
+      collectOutput(proc, 'gemini', timeoutMs, resolve, reject);
+      proc.stdin.write(prompt, 'utf-8');
+      proc.stdin.end();
+    })
+  ));
 }
 
 /**
@@ -142,17 +468,19 @@ export function runGemini(prompt, timeoutMs = CLI_TIMEOUT_MS) {
 export function runCodex(prompt, timeoutMs = CLI_TIMEOUT_MS) {
   console.log('[CLI] codex 실행 중...');
 
-  return new Promise((resolve, reject) => {
-    const proc = spawn('cmd.exe', ['/c', 'codex', 'exec', '--full-auto', '--skip-git-repo-check', '-'], {
-      cwd: CWD,
-      shell: false,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, FORCE_COLOR: '0' },
-    });
-    collectOutput(proc, 'codex', timeoutMs, resolve, reject);
-    proc.stdin.write(prompt, 'utf-8');
-    proc.stdin.end();
-  });
+  return withWriteScopeGuard('codex', () => (
+    new Promise((resolve, reject) => {
+      const proc = spawn('cmd.exe', ['/c', 'codex', 'exec', '--full-auto', '--skip-git-repo-check', '-'], {
+        cwd: CWD,
+        shell: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, FORCE_COLOR: '0' },
+      });
+      collectOutput(proc, 'codex', timeoutMs, resolve, reject);
+      proc.stdin.write(prompt, 'utf-8');
+      proc.stdin.end();
+    })
+  ));
 }
 
 /**
@@ -162,21 +490,23 @@ export function runCodex(prompt, timeoutMs = CLI_TIMEOUT_MS) {
 export function runAgent(prompt, timeoutMs = CLI_TIMEOUT_MS) {
   console.log('[CLI] agent (Cursor) 실행 중...');
   // 프롬프트를 PowerShell 인자에 넣으면 Windows 명령줄 한도·이스케이프 문제로 잘리거나 실패함 → stdin 전달
-  return new Promise((resolve, reject) => {
-    const proc = spawn(
-      'agent',
-      ['--print', '--yolo', '--trust', '--output-format', 'text'],
-      {
-        cwd: CWD,
-        shell: false,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, FORCE_COLOR: '0' },
-      },
-    );
-    collectOutput(proc, 'agent', timeoutMs, resolve, reject);
-    proc.stdin.write(prompt, 'utf-8');
-    proc.stdin.end();
-  });
+  return withWriteScopeGuard('agent', () => (
+    new Promise((resolve, reject) => {
+      const proc = spawn(
+        'agent',
+        ['--print', '--yolo', '--trust', '--output-format', 'text'],
+        {
+          cwd: CWD,
+          shell: false,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, FORCE_COLOR: '0' },
+        },
+      );
+      collectOutput(proc, 'agent', timeoutMs, resolve, reject);
+      proc.stdin.write(prompt, 'utf-8');
+      proc.stdin.end();
+    })
+  ));
 }
 
 /**
@@ -188,15 +518,17 @@ export function runCopilot(prompt, timeoutMs = CLI_TIMEOUT_MS) {
   const escaped = prompt.replace(/'/g, "''");
   const psCmd = `gh copilot suggest -t shell '${escaped}'`;
 
-  return new Promise((resolve, reject) => {
-    const proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psCmd], {
-      cwd: CWD,
-      shell: false,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, FORCE_COLOR: '0' },
-    });
-    collectOutput(proc, 'copilot', timeoutMs, resolve, reject);
-  });
+  return withWriteScopeGuard('copilot', () => (
+    new Promise((resolve, reject) => {
+      const proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psCmd], {
+        cwd: CWD,
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, FORCE_COLOR: '0' },
+      });
+      collectOutput(proc, 'copilot', timeoutMs, resolve, reject);
+    })
+  ));
 }
 
 /**
@@ -240,13 +572,15 @@ export async function withOllamaFallback(primaryFn, label, prompt, timeoutMs, ol
   }
 
   try {
-    const text = await primaryFn(prompt, timeoutMs);
+    const promptWithMemory = await buildPromptWithInfiniteContext(prompt);
+    const text = await primaryFn(promptWithMemory, timeoutMs);
     return { text, usedFallback: false };
   } catch (err) {
     console.warn(`[CLI] ${label} 실패 → Ollama 폴백: ${err.message}`);
     try {
       const resolved = await resolveOllamaPrompt();
-      const text = await runOllama(resolved, timeoutMs);
+      const ollamaPromptWithMemory = await buildPromptWithInfiniteContext(resolved);
+      const text = await runOllama(ollamaPromptWithMemory, timeoutMs);
       return { text, usedFallback: true };
     } catch (ollamaErr) {
       console.warn(`[Ollama] 폴백도 실패: ${ollamaErr.message} → 빈 응답으로 계속 진행`);

@@ -6,6 +6,17 @@
 import fs from 'fs/promises';
 import path from 'path';
 
+function resolveSafePathInside(baseDir, targetPath) {
+  const absoluteBase = path.resolve(baseDir);
+  const absoluteTarget = path.resolve(targetPath);
+  const rel = path.relative(absoluteBase, absoluteTarget);
+  const isInside = rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  if (!isInside) {
+    throw new Error(`Path must stay inside result directory: ${absoluteTarget}`);
+  }
+  return absoluteTarget;
+}
+
 /**
  * 핸드오프 MD 파일을 생성합니다.
  */
@@ -17,8 +28,9 @@ export async function generateHandoff(state, contextMonitor, goContent = '') {
     .replace(/:/g, '-')
     .split('.')[0];
 
-  const handoffDir = process.env.HANDOFF_DIR ?? './handoff';
-  const filename = path.join(handoffDir, `handoff_${timestamp}.md`);
+  const resultDir = path.resolve(process.cwd(), process.env.RESULT_DIR ?? './result');
+  const handoffDir = resolveSafePathInside(resultDir, path.resolve(process.cwd(), process.env.HANDOFF_DIR ?? './result/handoff'));
+  const filename = resolveSafePathInside(handoffDir, path.join(handoffDir, `handoff_${timestamp}.md`));
 
   const completedTasks = state.completedTasks ?? [];
   const pendingTasks   = state.pendingTasks   ?? [];
@@ -80,7 +92,7 @@ ${changedFiles}
 
 ---
 
-## go.md 원본 내용
+## goal.md 원본 내용
 
 \`\`\`markdown
 ${goContent.slice(0, 2000)}${goContent.length > 2000 ? '\n...(생략)' : ''}

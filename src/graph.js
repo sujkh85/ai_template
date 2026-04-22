@@ -1,6 +1,6 @@
 /**
  * LangGraph 워크플로우: supervisor → worker → (반복) → FINISH
- * go.md의 태스크를 순서대로 처리합니다.
+ * goal.md의 태스크를 순서대로 처리합니다.
  */
 
 import { StateGraph, Annotation, END, START } from '@langchain/langgraph';
@@ -21,10 +21,10 @@ const AgentState = Annotation.Root({
   // 라우팅
   next: Annotation({ default: () => 'supervisor' }),
 
-  // go.md 원본 내용 (실행 중 참조용)
+  // goal.md 원본 내용 (실행 중 참조용)
   goContent: Annotation({ default: () => '' }),
 
-  // 전체 태스크 목록 (go.md에서 파싱)
+  // 전체 태스크 목록 (goal.md에서 파싱)
   allTasks: Annotation({
     reducer: (_, incoming) => incoming ?? [],
     default: () => [],
