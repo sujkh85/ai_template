@@ -34,13 +34,14 @@ function resolveResultDir(cwd) {
 async function main() {
   const executionMode  = 'infinite-context';
   const agentFilePath  = process.env.AGENT_FILE ?? './agent.md';
-  const requirementsFilePath = process.env.REQUIREMENTS_FILE ?? './requirements.md';
+  const goalFilePath = process.env.GO_FILE ?? './goal.md';
   const autoRestart    = process.env.AUTO_RESTART !== 'false'; // 기본 true
   const recursionLimit = Number(process.env.RECURSION_LIMIT ?? 5000);
-  const enforceTestCompletion = process.env.ENFORCE_TEST_COMPLETION !== 'false';
+  /** 소설/기획 위주 infinite-context에서는 기본으로 끔(명시적 true일 때만 추가) */
+  const enforceTestCompletion = process.env.ENFORCE_TEST_COMPLETION === 'true';
 
-  // ─── 세션 번호 계산 ──────────────────────────────────────
-  const sessionNumber = 1;
+  // ─── 세션 번호 계산 (sessionLauncher가 다음 세션에서 SESSION_NUMBER 전달) ───
+  const sessionNumber = Math.max(1, Number.parseInt(process.env.SESSION_NUMBER ?? '1', 10) || 1);
   printBanner(sessionNumber);
 
   // ─── 실행 컨텐츠 로딩 ──────────────────────────────────────
@@ -49,24 +50,27 @@ async function main() {
   let previouslyCompleted = [];
   let pendingTasks = [];
 
-  const [agentContent, requirementsContent] = await Promise.all([
+  const goalResolved = path.resolve(process.cwd(), goalFilePath);
+  const [agentContent, goalBody] = await Promise.all([
     fs.readFile(path.resolve(agentFilePath), 'utf-8').catch(() => ''),
-    fs.readFile(path.resolve(requirementsFilePath), 'utf-8').catch(() => ''),
+    fs.readFile(goalResolved, 'utf-8').catch(() => ''),
   ]);
   const designBundle = await loadDesignBundle({ cwd: process.cwd() });
   const runtimeTaskContext = await loadRuntimeTaskContext(process.cwd());
 
   augmentedGoContent = augmentGoContent(
     `# Autopilot Source (infinite-context mode)\n\n` +
+    `## goal.md (프로젝트 목표·제약 — 반드시 준수)\n` +
+    `파일: ${goalResolved}\n\n` +
+    `${goalBody.trim() || '(goal.md 없음 또는 읽기 실패)'}\n\n` +
     `## agent.md\n${agentContent || '(agent.md 없음)'}\n\n` +
-    `## requirements.md\n${requirementsContent || '(requirements.md 없음)'}\n\n` +
     `## runtime tasks (infinite-context)\n${runtimeTaskContext.bundle || '(task 없음)'}\n`,
     designBundle,
   );
 
   allTasks = runtimeTaskContext.taskNames.length > 0
     ? [...runtimeTaskContext.taskNames]
-    : ['requirements 기반 다음 최우선 작업 실행'];
+    : ['goal.md 기반 다음 최우선 작업 실행'];
   if (enforceTestCompletion) {
     allTasks.push('모든 테스트 완료');
   }
@@ -75,7 +79,7 @@ async function main() {
 
   console.log(`📄 mode: infinite-context`);
   console.log(`📄 agent.md: ${path.resolve(agentFilePath)}`);
-  console.log(`📄 requirements.md: ${path.resolve(requirementsFilePath)}`);
+  console.log(`📄 goal.md: ${goalResolved}`);
   console.log(`📄 runtime task source: infinite-context${runtimeTaskContext.usedFallback ? ' (local backup fallback)' : ''}`);
   if (process.env.DESIGN_DIR) {
     console.log(`📁 DESIGN_DIR: ${path.resolve(process.cwd(), process.env.DESIGN_DIR)}`);
@@ -147,7 +151,9 @@ async function main() {
     launchNextSession({ sessionNumber: sessionNumber + 1, delayMs: 3000 });
   } else if (!hasMoreWork) {
     console.log('\n🎉 현재 세션 태스크를 완료했습니다.');
-    console.log('   다음 작업은 requirements.md 기준으로 이어서 진행됩니다.');
+    console.log('   goal.md·agent.md·Infinite Context 메모리를 기준으로 다음 배치를 준비하거나,');
+    console.log('   `pnpm run make-task` 후 다시 `pnpm start` 하면 태스크가 갱신됩니다.');
+    console.log('   같은 태스크를 반복 실행하려면 환경변수 CONTINUOUS_MODE=true 를 설정하세요.');
   } else {
     console.log('\n[Main] AUTO_RESTART=false — 자동 재시작 비활성화');
     console.log('   npm start를 다시 실행하면 남은 태스크를 이어서 진행합니다.');

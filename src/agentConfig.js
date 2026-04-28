@@ -1,4 +1,4 @@
-import { runClaude, runCodex, runGemini, runAgent, runCopilot } from './cliRunner.js';
+import { runClaude, runCodex, runGemini, runAgent, runCopilot, runOllama } from './cliRunner.js';
 
 const RUNNERS = {
   claude: runClaude,
@@ -6,6 +6,7 @@ const RUNNERS = {
   gemini: runGemini,
   agent: runAgent,
   copilot: runCopilot,
+  ollama: runOllama,
 };
 
 function normalizeAi(value, fallback) {

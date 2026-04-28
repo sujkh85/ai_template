@@ -11,7 +11,7 @@ Korean and English README for the current codebase.
 이 프로젝트는 **infinite-context MCP 기반 자율 실행 템플릿**입니다.  
 핵심은 다음과 같습니다.
 
-- `agent.md` + `requirements.md` + task 문맥을 합쳐 Worker에게 전달
+- `goal.md` + `agent.md` + task 문맥을 합쳐 Worker에게 전달 (목표·제약은 `goal.md`에 통합)
 - `Supervisor -> Worker` LangGraph 루프로 태스크를 계속 실행
 - 컨텍스트 한도 접근 시 handoff/재시작으로 장기 작업 유지
 - 설계/태스크 문서를 생성하고(`make-design`, `make-task`), 메모리에 저장(`db-save-task`)한 뒤 실행(`start`)
@@ -49,7 +49,7 @@ pnpm go
 ### 3) 빠른 시작
 
 1. `.env.example`을 복사해서 `.env` 생성
-2. `goal.md`, `agent.md`, `requirements.md` 준비
+2. `goal.md`, `agent.md` 준비 (`goal.md`에 목표·제약 통합)
 3. 필요한 경우 AI CLI 로그인(예: `agent login`, `gh auth login`)
 4. `pnpm go` 실행
 
@@ -81,11 +81,11 @@ pnpm go
 전체는 `.env.example` 참고, 자주 쓰는 항목만 요약:
 
 - 실행/AI
-  - `SUPERVISOR_AI` (`claude | gemini | codex | agent | copilot`)
+  - `SUPERVISOR_AI` (`claude | gemini | codex | agent | copilot | ollama`)
   - `WORKER_AI`
   - `EXECUTION_MODE` (기본: `infinite-context`)
 - 입력/출력 경로
-  - `AGENT_FILE`, `REQUIREMENTS_FILE`, `GO_FILE`
+  - `AGENT_FILE`, `GO_FILE`
   - `DESIGN_DIR`, `TASK_DIR`
 - 자동 실행 제어
   - `AUTO_RESTART` (기본 `true`)
@@ -105,7 +105,6 @@ pnpm go
 ```text
 .
 ├─ agent.md
-├─ requirements.md
 ├─ goal.md
 ├─ .env.example
 ├─ package.json
@@ -161,7 +160,7 @@ This is an **autonomous agent template powered by infinite-context MCP**.
 
 Key behavior:
 
-- Combines `agent.md`, `requirements.md`, and runtime task context for workers
+- Combines `goal.md`, `agent.md`, and runtime task context for workers
 - Runs a LangGraph loop (`Supervisor -> Worker`) until tasks are completed
 - Uses handoff/restart when context usage gets high
 - Supports planning pipeline (`make-design`, `make-task`, `db-save-task`) before runtime execution
@@ -199,7 +198,7 @@ Execution order of `pnpm go`:
 ### 3) Quick Start
 
 1. Copy `.env.example` to `.env`
-2. Prepare `goal.md`, `agent.md`, and `requirements.md`
+2. Prepare `goal.md` and `agent.md` (constraints live in `goal.md`)
 3. Sign in to required CLIs (for example `agent login`, `gh auth login`)
 4. Run `pnpm go`
 
@@ -231,11 +230,11 @@ Execution order of `pnpm go`:
 See `.env.example` for full details. Commonly used:
 
 - AI/runtime
-  - `SUPERVISOR_AI` (`claude | gemini | codex | agent | copilot`)
+  - `SUPERVISOR_AI` (`claude | gemini | codex | agent | copilot | ollama`)
   - `WORKER_AI`
   - `EXECUTION_MODE` (default: `infinite-context`)
 - Paths
-  - `AGENT_FILE`, `REQUIREMENTS_FILE`, `GO_FILE`
+  - `AGENT_FILE`, `GO_FILE`
   - `DESIGN_DIR`, `TASK_DIR`
 - Execution control
   - `AUTO_RESTART` (default `true`)
@@ -255,7 +254,6 @@ See `.env.example` for full details. Commonly used:
 ```text
 .
 ├─ agent.md
-├─ requirements.md
 ├─ goal.md
 ├─ .env.example
 ├─ package.json
@@ -306,14 +304,14 @@ See `.env.example` for full details. Commonly used:
 
 > A multi-agent template for autonomous execution with `infinite-context` memory.
 
-This template is focused on `agent.md + requirements.md + infinite-context MCP` execution.  
+This template is focused on `goal.md + agent.md + infinite-context MCP` execution.  
 When context reaches its threshold, it saves progress and automatically restarts in a new session to continue work without interruption.
 
 ---
 
 ## Features
 
-- **infinite-context mode** — use `agent.md`/`requirements.md` as runtime instructions with MCP-first long-running memory flow
+- **infinite-context mode** — use `goal.md`/`agent.md` as runtime instructions with MCP-first long-running memory flow
 - **Multi-agent pipeline** — Supervisor chooses next action and Worker executes tasks
 - **Automatic session restart** — resumes work after context-limit handoff
 - **Flexible AI pairings** — choose `claude`, `gemini`, or `codex` per role
@@ -340,7 +338,6 @@ template/
 │       └── workerAgent.js
 ├── goal.md
 ├── agent.md
-├── requirements.md
 ├── .env
 ├── .env.example
 └── package.json
@@ -385,7 +382,6 @@ cp .env.example .env
 ```env
 EXECUTION_MODE=infinite-context
 AGENT_FILE=./agent.md
-REQUIREMENTS_FILE=./requirements.md
 AUTO_RESTART=true
 ```
 
@@ -427,7 +423,7 @@ Tip: add explicit rules in `agent.md` and prompts to prioritize MCP memory usage
 ```text
 npm start
   └─ Check execution mode (infinite-context)
-       └─ Load agent.md + requirements.md (MCP-first guidance)
+       └─ Load goal.md + agent.md (MCP-first guidance)
        └─ LangGraph execution
             ├─ Supervisor decides next worker step
             ├─ Worker executes task
@@ -449,7 +445,6 @@ npm start
 | `WORKER_AI` | `claude` | Worker AI (`claude` \| `gemini` \| `codex`) |
 | `GO_FILE` | `./goal.md` | goal file path |
 | `AGENT_FILE` | `./agent.md` | Agent instruction file for `infinite-context` mode |
-| `REQUIREMENTS_FILE` | `./requirements.md` | Requirements file for `infinite-context` mode |
 | `AUTO_RESTART` | `true` | Auto-start next session after cycle ends |
 | `CONTINUOUS_MODE` | `false` | Restart from first task after all tasks complete |
 | `WORKER_ITERATIONS` | `1` | Worker iterations per task |
@@ -478,13 +473,13 @@ npm start
 
 > `infinite-context` 메모리를 기반으로 자율 실행하는 멀티 에이전트 템플릿
 
-`agent.md + requirements.md + infinite-context MCP` 기반 실행에 집중합니다. 컨텍스트 한도에 도달하면 진행 상황을 저장하고 새 세션으로 자동 재시작하여 작업을 끊김 없이 이어갑니다.
+`goal.md + agent.md + infinite-context MCP` 기반 실행에 집중합니다. (목표·제약은 `goal.md`에 작성) 컨텍스트 한도에 도달하면 진행 상황을 저장하고 새 세션으로 자동 재시작하여 작업을 끊김 없이 이어갑니다.
 
 ---
 
 ## 특징
 
-- **infinite-context 기반 실행** — `agent.md`/`requirements.md`를 런타임 지시로 사용하고, MCP 메모리 우선으로 장기 작업 지속
+- **infinite-context 기반 실행** — `goal.md`/`agent.md`를 런타임 지시로 사용하고, MCP 메모리 우선으로 장기 작업 지속
 - **멀티 에이전트 파이프라인** — Supervisor가 다음 실행 에이전트를 결정하고, Worker가 실제 태스크를 처리
 - **자동 세션 재시작** — 컨텍스트 토큰 한도 도달 시 핸드오프를 기록하고 새 Node 프로세스로 자동 재개
 - **AI 조합 선택** — Supervisor와 Worker에 각각 `claude`, `gemini`, `codex`, `agent`, `copilot` 중 원하는 AI 지정 가능
@@ -569,8 +564,8 @@ cp .env.example .env
 `.env`를 열어 사용할 AI를 설정합니다.
 
 ```env
-SUPERVISOR_AI=gemini   # supervisor에 사용할 AI (claude | gemini | codex | agent | copilot)
-WORKER_AI=claude       # worker에 사용할 AI (claude | gemini | codex | agent | copilot)
+SUPERVISOR_AI=gemini   # supervisor에 사용할 AI (claude | gemini | codex | agent | copilot | ollama)
+WORKER_AI=claude       # worker에 사용할 AI (claude | gemini | codex | agent | copilot | ollama)
 
 # (선택) design 폴더의 markdown 파일을 goal.md 뒤에 자동 주입
 DESIGN_DIR=./design
@@ -655,14 +650,13 @@ npm start
 
 ### 7. infinite-context 자율주행 모드 사용
 
-`agent.md + requirements.md`를 기반으로 장기 세션 자율주행을 하려면 아래처럼 설정합니다.
+`goal.md + agent.md`를 기반으로 장기 세션 자율주행을 하려면 아래처럼 설정합니다. (목표·제약은 `goal.md`에 통합)
 
 1) `.env` 설정
 
 ```env
 EXECUTION_MODE=infinite-context
 AGENT_FILE=./agent.md
-REQUIREMENTS_FILE=./requirements.md
 AUTO_RESTART=true
 ```
 
@@ -673,7 +667,7 @@ npm start
 ```
 
 3) 동작 방식
-- `agent.md`/`requirements.md`를 런타임 지시로 사용합니다.
+- `goal.md`/`agent.md`를 런타임 지시로 사용합니다. (`goal.md`에 목표와 제약을 함께 작성)
 - Worker 반복 횟수(`WORKER_ITERATIONS`)만으로 태스크를 완료 처리하지 않고, 실제 완료 신호가 있을 때만 완료로 간주합니다.
 - 컨텍스트 임계치 도달 시 기존처럼 핸드오프 후 다음 세션으로 이어집니다.
 - 세션 연속성은 `infinite-context` MCP 메모리 흐름 기준으로 이어집니다.
@@ -685,7 +679,7 @@ npm start
 ```
 npm start
   └─ 실행 모드 확인 (infinite-context)
-       └─ agent.md + requirements.md 로드 (MCP 메모리 우선 지시)
+       └─ goal.md + agent.md 로드 (MCP 메모리 우선 지시)
        └─ LangGraph 실행
             ├─ Supervisor → 다음 실행할 Worker 결정
             ├─ Worker → 태스크 실행
@@ -705,9 +699,8 @@ npm start
 | `EXECUTION_MODE` | `infinite-context` | 실행 모드 (`infinite-context`) |
 | `SUPERVISOR_AI` | `gemini` | Supervisor 에이전트 AI (`claude` \| `gemini` \| `codex` \| `agent` \| `copilot`) |
 | `WORKER_AI` | `claude` | Worker 에이전트 AI (`claude` \| `gemini` \| `codex` \| `agent` \| `copilot`) |
-| `GO_FILE` | `./goal.md` | `make-design` 입력 파일 경로 |
+| `GO_FILE` | `./goal.md` | 목표·제약·태스크 단일 기준 파일 (`make-design` 입력) |
 | `AGENT_FILE` | `./agent.md` | `infinite-context` 모드에서 읽을 에이전트 지시 파일 |
-| `REQUIREMENTS_FILE` | `./requirements.md` | `infinite-context` 모드에서 읽을 요구사항 파일 |
 | `DESIGN_DIR` | `./design` | 기획 MD 출력 폴더(`make-design`)이자, 실행 시 goal.md 뒤에 주입할 루트(비우면 주입 비활성) |
 | `DESIGN_GLOB` | `**/*.md` | `DESIGN_DIR` 하위에서 주입·수집할 마크다운 패턴 |
 | `DESIGN_MAX_CHARS_PER_FILE` | `200000` | 파일당 최대 주입 문자 수 |

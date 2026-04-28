@@ -4,7 +4,9 @@
  * 각 CLI 실패 또는 사용량 초과 시 Ollama REST API로 자동 폴백합니다.
  */
 
+import { getResolvedNpmCacheDir } from './loadEnv.js';
 import { randomBytes } from 'crypto';
+import { createReadStream } from 'fs';
 import { writeFile, unlink, readdir, stat } from 'fs/promises';
 import { mkdirSync } from 'fs';
 import { tmpdir } from 'os';
@@ -14,21 +16,36 @@ import { MultiServerMCPClient } from '@langchain/mcp-adapters';
 
 const PROJECT_CWD = process.cwd();
 const RESULT_DIR = resolveResultDir(PROJECT_CWD, process.env.RESULT_DIR ?? './result');
-const CWD = RESULT_DIR;
-const CLI_TIMEOUT_MS = Number(process.env.CLI_TIMEOUT_MS ?? 600_000);
+const CWD = PROJECT_CWD;
+const CLI_TIMEOUT_MS = Number(process.env.CLI_TIMEOUT_MS ?? 1_800_000);
 const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'gemma3:12b';
 const EXECUTION_MODE = process.env.EXECUTION_MODE ?? 'infinite-context';
 const INFINITE_CONTEXT_SERVER = process.env.INFINITE_CONTEXT_SERVER_NAME ?? 'infinite-context';
 const INFINITE_CONTEXT_MCP_COMMAND = process.env.INFINITE_CONTEXT_MCP_COMMAND ?? 'npx';
-const INFINITE_CONTEXT_MCP_ARGS = (process.env.INFINITE_CONTEXT_MCP_ARGS ?? '-y infinite-context')
-  .split(' ')
-  .map((part) => part.trim())
-  .filter(Boolean);
+
+function splitMcpArgs(envValue) {
+  return String(envValue ?? '-y infinite-context')
+    .split(' ')
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/** npx 는 --cache 로 깨진 ~/.npm 캐시를 우회한다. (@langchain/mcp-adapters stdio env 도 동시에 맞춤) */
+function getInfiniteContextMcpArgs() {
+  const parts = splitMcpArgs(process.env.INFINITE_CONTEXT_MCP_ARGS);
+  const cmd = INFINITE_CONTEXT_MCP_COMMAND.trim();
+  const exe = basename(cmd.replace(/\\/g, '/')).toLowerCase();
+  const cacheDir = getResolvedNpmCacheDir();
+  if (exe === 'npx' || exe === 'npx.cmd') {
+    return ['--cache', cacheDir, ...parts];
+  }
+  return parts;
+}
 const ROOT_FOLDER_NAME = basename(PROJECT_CWD);
 const AUTO_SCOPE_ID = sanitizeScopeId(ROOT_FOLDER_NAME) || 'project';
-const WRITE_SCOPE_DIR = RESULT_DIR;
 const SNAPSHOT_IGNORE_DIRS = new Set(['.git', 'node_modules']);
+const IS_WIN32 = process.platform === 'win32';
 
 mkdirSync(RESULT_DIR, { recursive: true });
 
@@ -51,8 +68,6 @@ async function captureWorkspaceSnapshot(baseDir) {
       const relPath = normalizeRelPath(baseDir, absolutePath);
 
       if (relPath === '') continue;
-      if (isPathInside(WRITE_SCOPE_DIR, absolutePath)) continue;
-
       if (entry.isDirectory()) {
         if (SNAPSHOT_IGNORE_DIRS.has(entry.name)) continue;
         await walk(absolutePath);
@@ -93,19 +108,8 @@ function detectWorkspaceViolations(beforeSnapshot, afterSnapshot) {
 }
 
 async function withWriteScopeGuard(label, runFn) {
-  const beforeSnapshot = await captureWorkspaceSnapshot(PROJECT_CWD);
-  const result = await runFn();
-  const afterSnapshot = await captureWorkspaceSnapshot(PROJECT_CWD);
-  const violations = detectWorkspaceViolations(beforeSnapshot, afterSnapshot);
-
-  if (violations.length > 0) {
-    const preview = violations.slice(0, 12).join('\n');
-    throw new Error(
-      `[${label}] 쓰기/삭제 권한 위반 감지: result/ 밖 변경은 금지됩니다.\n${preview}`,
-    );
-  }
-
-  return result;
+  // 기존 result/ 전용 쓰기 제한을 제거하고 프로젝트 루트 작업을 허용합니다.
+  return runFn();
 }
 
 function resolveResultDir(projectCwd, configuredPath) {
@@ -200,7 +204,12 @@ async function getInfiniteContextClient() {
           [INFINITE_CONTEXT_SERVER]: {
             transport: 'stdio',
             command: INFINITE_CONTEXT_MCP_COMMAND,
-            args: INFINITE_CONTEXT_MCP_ARGS,
+            args: getInfiniteContextMcpArgs(),
+            env: {
+              ...process.env,
+              npm_config_cache: getResolvedNpmCacheDir(),
+              NPM_CONFIG_CACHE: getResolvedNpmCacheDir(),
+            },
           },
         },
       }),
@@ -410,7 +419,9 @@ async function buildPromptWithInfiniteContext(prompt) {
 }
 
 /**
- * Claude CLI (PowerShell 경유)
+ * Claude CLI
+ * - Windows: PowerShell로 임시 파일 → stdin 파이프(명령줄 길이 한도 회피)
+ * - macOS/Linux: 동일 임시 파일을 fs.createReadStream으로 claude stdin에 연결
  */
 export function runClaude(prompt, timeoutMs = CLI_TIMEOUT_MS) {
   console.log('[CLI] claude 실행 중...');
@@ -421,18 +432,49 @@ export function runClaude(prompt, timeoutMs = CLI_TIMEOUT_MS) {
     );
     await writeFile(built.filePath, prompt, 'utf-8');
     try {
+      if (IS_WIN32) {
+        return await new Promise((resolve, reject) => {
+          const proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', built.psCmd], {
+            cwd: CWD,
+            shell: false,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, FORCE_COLOR: '0' },
+          });
+          proc.on('error', (err) => {
+            unlink(built.filePath).catch(() => {});
+            reject(err);
+          });
+          collectOutput(proc, 'claude', timeoutMs, resolve, reject);
+        });
+      }
+
       return await new Promise((resolve, reject) => {
-        const proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', built.psCmd], {
+        const filePath = built.filePath;
+        const finish = (fn, arg) => {
+          unlink(filePath).catch(() => {});
+          fn(arg);
+        };
+
+        const proc = spawn('claude', ['-p', '-', '--dangerously-skip-permissions'], {
           cwd: CWD,
           shell: false,
-          stdio: ['ignore', 'pipe', 'pipe'],
+          stdio: ['pipe', 'pipe', 'pipe'],
           env: { ...process.env, FORCE_COLOR: '0' },
         });
-        proc.on('error', (err) => {
-          unlink(built.filePath).catch(() => {});
-          reject(err);
-        });
-        collectOutput(proc, 'claude', timeoutMs, resolve, reject);
+
+        proc.on('error', (err) => finish(reject, err));
+
+        const rs = createReadStream(filePath, { encoding: 'utf-8' });
+        rs.on('error', (err) => finish(reject, err));
+        rs.pipe(proc.stdin);
+
+        collectOutput(
+          proc,
+          'claude',
+          timeoutMs,
+          (out) => finish(resolve, out),
+          (err) => finish(reject, err),
+        );
       });
     } catch (err) {
       await unlink(built.filePath).catch(() => {});
@@ -449,12 +491,20 @@ export function runGemini(prompt, timeoutMs = CLI_TIMEOUT_MS) {
 
   return withWriteScopeGuard('gemini', () => (
     new Promise((resolve, reject) => {
-      const proc = spawn('cmd.exe', ['/c', 'gemini', '-p', ' ', '--yolo'], {
-        cwd: CWD,
-        shell: false,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, FORCE_COLOR: '0' },
-      });
+      const geminiArgs = ['-p', ' ', '--yolo'];
+      const proc = IS_WIN32
+        ? spawn('cmd.exe', ['/c', 'gemini', ...geminiArgs], {
+          cwd: CWD,
+          shell: false,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, FORCE_COLOR: '0' },
+        })
+        : spawn('gemini', geminiArgs, {
+          cwd: CWD,
+          shell: false,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, FORCE_COLOR: '0' },
+        });
       collectOutput(proc, 'gemini', timeoutMs, resolve, reject);
       proc.stdin.write(prompt, 'utf-8');
       proc.stdin.end();
@@ -470,12 +520,20 @@ export function runCodex(prompt, timeoutMs = CLI_TIMEOUT_MS) {
 
   return withWriteScopeGuard('codex', () => (
     new Promise((resolve, reject) => {
-      const proc = spawn('cmd.exe', ['/c', 'codex', 'exec', '--full-auto', '--skip-git-repo-check', '-'], {
-        cwd: CWD,
-        shell: false,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, FORCE_COLOR: '0' },
-      });
+      const codexArgs = ['exec', '--full-auto', '--skip-git-repo-check', '-'];
+      const proc = IS_WIN32
+        ? spawn('cmd.exe', ['/c', 'codex', ...codexArgs], {
+          cwd: CWD,
+          shell: false,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, FORCE_COLOR: '0' },
+        })
+        : spawn('codex', codexArgs, {
+          cwd: CWD,
+          shell: false,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, FORCE_COLOR: '0' },
+        });
       collectOutput(proc, 'codex', timeoutMs, resolve, reject);
       proc.stdin.write(prompt, 'utf-8');
       proc.stdin.end();
@@ -510,22 +568,34 @@ export function runAgent(prompt, timeoutMs = CLI_TIMEOUT_MS) {
 }
 
 /**
- * GitHub Copilot CLI (gh copilot suggest, PowerShell 경유)
+ * GitHub Copilot CLI (gh copilot suggest)
+ * - Windows: PowerShell로 인자 이스케이프(명령줄 한도·따옴표 이슈 완화)
+ * - macOS/Linux: gh argv 배열로 직접 실행
  * 사전 요구사항: gh auth login + gh extension install github/gh-copilot
  */
 export function runCopilot(prompt, timeoutMs = CLI_TIMEOUT_MS) {
   console.log('[CLI] copilot (gh copilot suggest) 실행 중...');
-  const escaped = prompt.replace(/'/g, "''");
-  const psCmd = `gh copilot suggest -t shell '${escaped}'`;
 
   return withWriteScopeGuard('copilot', () => (
     new Promise((resolve, reject) => {
-      const proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psCmd], {
-        cwd: CWD,
-        shell: false,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, FORCE_COLOR: '0' },
-      });
+      let proc;
+      if (IS_WIN32) {
+        const escaped = prompt.replace(/'/g, "''");
+        const psCmd = `gh copilot suggest -t shell '${escaped}'`;
+        proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psCmd], {
+          cwd: CWD,
+          shell: false,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, FORCE_COLOR: '0' },
+        });
+      } else {
+        proc = spawn('gh', ['copilot', 'suggest', '-t', 'shell', prompt], {
+          cwd: CWD,
+          shell: false,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, FORCE_COLOR: '0' },
+        });
+      }
       collectOutput(proc, 'copilot', timeoutMs, resolve, reject);
     })
   ));

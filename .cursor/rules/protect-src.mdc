@@ -1,0 +1,11 @@
+---
+description: 자율 에이전트는 src 런타임 코드를 수정하지 않음 — 산출물은 task_data 등으로
+alwaysApply: true
+---
+
+# `src/` 보호
+
+- **프로젝트 루트의 `src/` 이하 파일은 생성·수정·삭제·리네임하지 않는다.** 여기에는 `pnpm start` 파이프라인(LangGraph, CLI 러너 등)이 포함된다.
+- 작업 산출물·원고·기획서·임시 결과는 **`task_data/`**, **`design/`**, **`task/`**, **`result/`**, **`handoff/`** 등으로만 다룬다.
+- 런타임 코드 변경이 필요하면 사용자에게 요청하고, 사용자가 허용·실행한다.
+- 예외적으로 `src/` 편집이 필요하면 사용자가 **`ALLOW_AGENT_SRC_EDIT=true`** 를 설정한 세션에서만 최소 변경을 한다.

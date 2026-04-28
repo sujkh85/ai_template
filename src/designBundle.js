@@ -12,8 +12,20 @@ import { glob } from 'glob';
  * @returns {Promise<string>}
  */
 export async function loadDesignBundle({ cwd }) {
-  const raw = process.env.DESIGN_DIR;
+  let raw = process.env.DESIGN_DIR;
   if (raw === undefined || raw === '') {
+    const fallbackDir = path.resolve(cwd, 'design');
+    try {
+      const st = await fs.stat(fallbackDir);
+      if (st.isDirectory()) {
+        raw = 'design';
+        console.log('[DesignBundle] DESIGN_DIR 미설정 → ./design 자동 사용');
+      }
+    } catch {
+      return '';
+    }
+  }
+  if (!raw) {
     return '';
   }
 

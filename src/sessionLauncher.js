@@ -25,6 +25,7 @@ export function launchNextSession({ sessionNumber = 1, delayMs = 2000 } = {}) {
     // 환경변수 복사 (HANDOFF_FILE 제거 — goal.md에서 직접 복원)
     const env = { ...process.env };
     delete env.HANDOFF_FILE;
+    env.SESSION_NUMBER = String(sessionNumber);
 
     console.log(`[SessionLauncher] 새 세션 프로세스 시작: node ${entryPoint}`);
     console.log('─'.repeat(60));

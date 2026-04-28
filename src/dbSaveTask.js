@@ -1,6 +1,7 @@
 import './loadEnv.js';
 import fs from 'fs/promises';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { glob } from 'glob';
 import {
   saveTaskDocToInfiniteContext,
@@ -12,114 +13,128 @@ const DEFAULT_TASK_DIR = './task';
 const DEFAULT_TASK_GLOB = '**/*.md';
 const EXPORT_FILE = '.task-memory-export.json';
 const CHECKPOINT_FILE = '.db-save-task-session.json';
+const __filename = fileURLToPath(import.meta.url);
 
-async function main() {
-  const cwd = process.cwd();
-  const taskDir = path.resolve(cwd, process.env.TASK_DIR ?? DEFAULT_TASK_DIR);
-  const pattern = process.env.TASK_GLOB ?? DEFAULT_TASK_GLOB;
-  const maxChars = Number(process.env.TASK_DB_SAVE_MAX_CHARS ?? 200_000);
-  const maxFilesPerSession = Number(process.env.TASK_DB_SAVE_MAX_FILES_PER_SESSION ?? 20);
-  const maxSaveRetries = Number(process.env.TASK_DB_SAVE_RETRIES ?? 3);
-  const checkpointPath = path.resolve(taskDir, CHECKPOINT_FILE);
+/**
+ * task/*.md를 infinite-context에 저장하고 로컬 백업을 남깁니다.
+ * `make-task` 완료 후 자동 호출되거나, `pnpm db-save-task`로 단독 실행할 수 있습니다.
+ */
+export async function runDbSaveTask() {
+  try {
+    const cwd = process.cwd();
+    const taskDir = path.resolve(cwd, process.env.TASK_DIR ?? DEFAULT_TASK_DIR);
+    const pattern = process.env.TASK_GLOB ?? DEFAULT_TASK_GLOB;
+    const maxChars = Number(process.env.TASK_DB_SAVE_MAX_CHARS ?? 200_000);
+    const maxFilesPerSession = Number(process.env.TASK_DB_SAVE_MAX_FILES_PER_SESSION ?? 20);
+    const maxSaveRetries = Number(process.env.TASK_DB_SAVE_RETRIES ?? 3);
+    const checkpointPath = path.resolve(taskDir, CHECKPOINT_FILE);
 
-  await fs.mkdir(taskDir, { recursive: true });
+    await fs.mkdir(taskDir, { recursive: true });
 
-  const files = await glob(pattern, {
-    cwd: taskDir,
-    nodir: true,
-    windowsPathsNoEscape: true,
-  });
-  const sorted = [...files].sort((a, b) => a.localeCompare(b, 'en'));
-  if (sorted.length === 0) {
-    throw new Error(`task 문서가 없습니다: ${taskDir}`);
-  }
+    const files = await glob(pattern, {
+      cwd: taskDir,
+      nodir: true,
+      windowsPathsNoEscape: true,
+    });
+    const sorted = [...files].sort((a, b) => a.localeCompare(b, 'en'));
+    if (sorted.length === 0) {
+      throw new Error(`task 문서가 없습니다: ${taskDir}`);
+    }
 
-  console.log(`[DbSaveTask] taskDir: ${taskDir}`);
-  console.log(`[DbSaveTask] files: ${sorted.length}`);
+    console.log(`[DbSaveTask] taskDir: ${taskDir}`);
+    console.log(`[DbSaveTask] files: ${sorted.length}`);
 
-  const checkpoint = await readCheckpoint(checkpointPath);
-  let startIndex = Number(checkpoint?.nextIndex ?? 0);
-  const exportRows = Array.isArray(checkpoint?.rows) ? checkpoint.rows : [];
-  let savedCount = Number(checkpoint?.savedCount ?? 0);
+    const checkpoint = await readCheckpoint(checkpointPath);
+    let startIndex = Number(checkpoint?.nextIndex ?? 0);
+    const exportRows = Array.isArray(checkpoint?.rows) ? checkpoint.rows : [];
+    let savedCount = Number(checkpoint?.savedCount ?? 0);
 
-  while (startIndex < sorted.length) {
-    const endIndexExclusive = Math.min(startIndex + maxFilesPerSession, sorted.length);
-    console.log(`[DbSaveTask] session range: ${startIndex + 1}..${endIndexExclusive}`);
+    while (startIndex < sorted.length) {
+      const endIndexExclusive = Math.min(startIndex + maxFilesPerSession, sorted.length);
+      console.log(`[DbSaveTask] session range: ${startIndex + 1}..${endIndexExclusive}`);
 
-    for (let i = startIndex; i < endIndexExclusive; i += 1) {
-      const rel = sorted[i];
-      const full = path.join(taskDir, rel);
-      let content = await fs.readFile(full, 'utf-8');
-      if (content.length > maxChars) {
-        content = `${content.slice(0, maxChars)}\n\n(길이 제한으로 일부만 저장됨)`;
+      for (let i = startIndex; i < endIndexExclusive; i += 1) {
+        const rel = sorted[i];
+        const full = path.join(taskDir, rel);
+        let content = await fs.readFile(full, 'utf-8');
+        if (content.length > maxChars) {
+          content = `${content.slice(0, maxChars)}\n\n(길이 제한으로 일부만 저장됨)`;
+        }
+
+        const name = rel.split(path.sep).join('/');
+        const ok = await saveTaskWithRetry({
+          name,
+          content,
+          taskDir,
+          maxRetries: maxSaveRetries,
+        });
+
+        if (ok) savedCount += 1;
+        upsertExportRow(exportRows, { name, content });
+        console.log(`[DbSaveTask] ${ok ? 'saved' : 'skipped'}: ${name}`);
       }
 
-      const name = rel.split(path.sep).join('/');
-      const ok = await saveTaskWithRetry({
-        name,
-        content,
+      const done = endIndexExclusive >= sorted.length;
+      if (done) {
+        break;
+      }
+
+      await writeCheckpoint(checkpointPath, {
         taskDir,
-        maxRetries: maxSaveRetries,
+        nextIndex: endIndexExclusive,
+        savedCount,
+        total: sorted.length,
+        rows: exportRows,
+        updatedAt: new Date().toISOString(),
+        note: 'infinite-context handoff checkpoint',
       });
 
-      if (ok) savedCount += 1;
-      upsertExportRow(exportRows, { name, content });
-      console.log(`[DbSaveTask] ${ok ? 'saved' : 'skipped'}: ${name}`);
+      await persistInfiniteContextHandoff(
+        [
+          '[db-save-task handoff]',
+          `taskDir: ${taskDir}`,
+          `nextIndex: ${endIndexExclusive}`,
+          `total: ${sorted.length}`,
+          'nextAction: resume db-save-task and continue remaining files',
+        ].join('\n'),
+        {
+          stage: 'db-save-task',
+          nextIndex: endIndexExclusive,
+          total: sorted.length,
+        },
+      );
+
+      console.log('[DbSaveTask] 체크포인트 저장 후 같은 세션에서 다음 범위를 이어서 처리합니다.');
+      startIndex = endIndexExclusive;
     }
 
-    const done = endIndexExclusive >= sorted.length;
-    if (done) {
-      break;
-    }
-
-    await writeCheckpoint(checkpointPath, {
-      taskDir,
-      nextIndex: endIndexExclusive,
-      savedCount,
-      total: sorted.length,
-      rows: exportRows,
-      updatedAt: new Date().toISOString(),
-      note: 'infinite-context handoff checkpoint',
-    });
-
-    await persistInfiniteContextHandoff(
-      [
-        '[db-save-task handoff]',
-        `taskDir: ${taskDir}`,
-        `nextIndex: ${endIndexExclusive}`,
-        `total: ${sorted.length}`,
-        'nextAction: resume db-save-task and continue remaining files',
-      ].join('\n'),
-      {
-        stage: 'db-save-task',
-        nextIndex: endIndexExclusive,
-        total: sorted.length,
-      },
+    const exportPath = path.resolve(taskDir, EXPORT_FILE);
+    await fs.writeFile(
+      exportPath,
+      JSON.stringify(
+        {
+          savedAt: new Date().toISOString(),
+          total: exportRows.length,
+          rows: exportRows,
+        },
+        null,
+        2,
+      ),
+      'utf-8',
     );
 
-    console.log('[DbSaveTask] 체크포인트 저장 후 같은 세션에서 다음 범위를 이어서 처리합니다.');
-    startIndex = endIndexExclusive;
+    await safeUnlink(checkpointPath);
+    console.log(`[DbSaveTask] infinite-context 저장 성공: ${savedCount}/${sorted.length}`);
+    console.log(`[DbSaveTask] backup: ${exportPath}`);
+  } finally {
+    await closeInfiniteContextClient();
   }
+}
 
-  // MCP 조회 실패 시를 대비한 로컬 백업
-  const exportPath = path.resolve(taskDir, EXPORT_FILE);
-  await fs.writeFile(
-    exportPath,
-    JSON.stringify(
-      {
-        savedAt: new Date().toISOString(),
-        total: exportRows.length,
-        rows: exportRows,
-      },
-      null,
-      2,
-    ),
-    'utf-8',
-  );
-
-  await safeUnlink(checkpointPath);
-  console.log(`[DbSaveTask] infinite-context 저장 성공: ${savedCount}/${sorted.length}`);
-  console.log(`[DbSaveTask] backup: ${exportPath}`);
+function isRunAsCli() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return path.resolve(entry) === __filename;
 }
 
 async function saveTaskWithRetry({ name, content, taskDir, maxRetries }) {
@@ -172,11 +187,9 @@ async function safeUnlink(filePath) {
   }
 }
 
-main()
-  .catch((error) => {
+if (isRunAsCli()) {
+  runDbSaveTask().catch((error) => {
     console.error(`\n[DbSaveTask] ${error.message}`);
     process.exitCode = 1;
-  })
-  .finally(async () => {
-    await closeInfiniteContextClient();
   });
+}

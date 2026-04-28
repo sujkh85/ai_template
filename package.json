@@ -1,16 +1,18 @@
 {
-  "name": "auto-agent-template",
+  "name": "ai-template",
   "version": "1.0.0",
-  "description": "go.md를 읽고 토큰이 소진될 때까지 자율 실행하는 멀티 에이전트 템플릿",
+  "description": "goal.md를 읽고 토큰이 소진될 때까지 자율 실행하는 멀티 에이전트 템플릿",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "make-design": "node src/makeDesign.js",
     "make-task": "node src/makeTask.js",
-    "db-save-task": "node src/dbSaveTask.js",
     "db-delete": "node src/dbDeleteTask.js",
-    "go": "pnpm run make-design && pnpm run make-task && pnpm run db-save-task && pnpm run start"
+    "init:start": "pnpm run make-design && pnpm run make-task && pnpm run start",
+    "init:env": "bash scripts/init-env.sh",
+    "lock:src": "bash scripts/lock-src.sh",
+    "unlock:src": "bash scripts/unlock-src.sh"
   },
   "dependencies": {
     "@langchain/core": "^0.3.0",

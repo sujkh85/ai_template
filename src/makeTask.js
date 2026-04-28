@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { glob } from 'glob';
 import { withOllamaFallback, persistInfiniteContextHandoff } from './cliRunner.js';
+import { runDbSaveTask } from './dbSaveTask.js';
 import { getCliRunner } from './agentConfig.js';
 
 const DEFAULT_DESIGN_DIR = './design';
@@ -72,6 +73,7 @@ async function main() {
     if (done) {
       await safeUnlink(checkpointPath);
       console.log('[MakeTask] task 문서 생성 완료');
+      await runDbSaveTask();
       return;
     }
 
