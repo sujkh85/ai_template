@@ -543,23 +543,28 @@ export function runCodex(prompt, timeoutMs = CLI_TIMEOUT_MS) {
 
 /**
  * Cursor Agent CLI (--print --yolo --trust 로 비대화형 실행)
- * 사전 요구사항: agent login
+ * - Windows: codex/gemini 와 동일하게 cmd.exe /c 로 실행 (PATH·PATHEXT 해석 일치, spawn ENOENT 완화)
+ * - 사전 요구사항: agent login, 터미널에서 `agent --version` 동작할 것 (PATH에 Cursor CLI 포함)
  */
 export function runAgent(prompt, timeoutMs = CLI_TIMEOUT_MS) {
   console.log('[CLI] agent (Cursor) 실행 중...');
   // 프롬프트를 PowerShell 인자에 넣으면 Windows 명령줄 한도·이스케이프 문제로 잘리거나 실패함 → stdin 전달
   return withWriteScopeGuard('agent', () => (
     new Promise((resolve, reject) => {
-      const proc = spawn(
-        'agent',
-        ['--print', '--yolo', '--trust', '--output-format', 'text'],
-        {
+      const agentArgs = ['--print', '--yolo', '--trust', '--output-format', 'text'];
+      const proc = IS_WIN32
+        ? spawn('cmd.exe', ['/c', 'agent', ...agentArgs], {
           cwd: CWD,
           shell: false,
           stdio: ['pipe', 'pipe', 'pipe'],
           env: { ...process.env, FORCE_COLOR: '0' },
-        },
-      );
+        })
+        : spawn('agent', agentArgs, {
+          cwd: CWD,
+          shell: false,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, FORCE_COLOR: '0' },
+        });
       collectOutput(proc, 'agent', timeoutMs, resolve, reject);
       proc.stdin.write(prompt, 'utf-8');
       proc.stdin.end();
